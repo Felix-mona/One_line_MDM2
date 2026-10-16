@@ -1,5 +1,6 @@
 #importing svg files and outputting coords
 def import_svg(file_path):
+    # not done yet, just understanding github
     coords = []
     with open(file_path, 'r') as file:
         for line in file:
