@@ -17,17 +17,6 @@ import numpy as np
 import xml.etree.ElementTree as ET
 
 
-import argparse
-import json
-import os
-import re
-import sys
-import matplotlib.animation as animation
-import matplotlib.pyplot as plt
-import numpy as np
-import xml.etree.ElementTree as ET
-
-
 def load_polyline_coordinates(file_path: str) -> np.ndarray:
     """Loads ordered 2D coordinates from a JSON polyline file, standard CSV, or SVG file."""
     if not os.path.exists(file_path):
@@ -54,10 +43,9 @@ def load_polyline_coordinates(file_path: str) -> np.ndarray:
                 for i in range(0, len(numbers) - 1, 2):
                     coords_list.append([numbers[i], numbers[i + 1]])
             
-            # 2. Handle SVG paths (extract all coordinate pairs following M, L, etc.)
+            # 2. Handle SVG paths (extract all coordinate pairs)
             elif tag == "path":
                 d_str = elem.get("d", "")
-                # Find all number tokens in path data
                 numbers = [float(n) for n in re.findall(r"[-+]?[0-9]*\.?[0-9]+", d_str)]
                 for i in range(0, len(numbers) - 1, 2):
                     coords_list.append([numbers[i], numbers[i + 1]])
@@ -82,6 +70,7 @@ def load_polyline_coordinates(file_path: str) -> np.ndarray:
         raise ValueError(f"Polyline must contain at least 3 points for Fourier analysis (found {len(coords)}).")
 
     return coords
+
 
 def resample_polyline_uniform(coords: np.ndarray, num_samples: int = 1024) -> np.ndarray:
     """
@@ -243,12 +232,17 @@ def animate_fourier_drawing(
     if output_anim_path:
         print(f"Exporting animation to: {output_anim_path}...")
         if output_anim_path.endswith(".mp4"):
-            writer = animation.FFMpegWriter(fps=fps, bitrate=1800)
+            writer = animation.FFMpegWriter(
+                fps=fps, 
+                bitrate=3000, 
+                codec="libx264", 
+                extra_args=["-pix_fmt", "yuv420p"]
+            )
             ani.save(output_anim_path, writer=writer)
         else:
-            # Default to GIF
+            # Default to GIF with explicit fps
             writer = animation.PillowWriter(fps=fps)
-            ani.save(output_anim_path, writer=writer)
+            ani.save(output_anim_path, writer=writer, fps=fps)
         print(f"Animation saved: {output_anim_path}")
 
     if show_window:
@@ -282,8 +276,8 @@ def main():
     parser.add_argument(
         "-f", "--frames",
         type=int,
-        default=600,
-        help="Total frames for one complete drawing loop (default: 600)"
+        default=None,
+        help="Total frames for one complete drawing loop (defaults to match sample count)"
     )
     parser.add_argument(
         "--fps",
@@ -312,16 +306,19 @@ def main():
         print(f"[2/4] Resampling polyline to {args.samples} uniform spatial samples...")
         resampled = resample_polyline_uniform(coords, num_samples=args.samples)
 
+        # Automatically ensure enough frames to cover the full length/samples if not explicitly provided
+        total_frames = args.frames if args.frames is not None else max(args.samples, 1200)
+
         print(f"[3/4] Computing Discrete Fourier Transform (DFT)...")
         epicycles, N = compute_fourier_coefficients(resampled, num_harmonics=args.harmonics)
         print(f"      Generated {len(epicycles)} epicycle components sorted by radius.")
 
-        print(f"[4/4] Starting animation engine...")
+        print(f"[4/4] Starting animation engine ({total_frames} frames at {args.fps} FPS)...")
         animate_fourier_drawing(
             epicycles=epicycles,
             resampled_points=resampled,
             output_anim_path=args.output,
-            total_frames=args.frames,
+            total_frames=total_frames,
             fps=args.fps,
             show_window=not args.no_show
         )
