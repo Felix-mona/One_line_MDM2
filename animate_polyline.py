@@ -1,5 +1,5 @@
 """
-fourier_draw_polyline.py
+animate_polyline.py
 
 Decomposes a 2D continuous polyline into discrete Fourier series epicycles
 (complex Fourier coefficients) and renders an animated visualization of rotating
@@ -46,7 +46,7 @@ def load_polyline_coordinates(file_path: str) -> np.ndarray:
             # 2. Handle SVG paths (extract all coordinate pairs)
             elif tag == "path":
                 d_str = elem.get("d", "")
-                numbers = [float(n) for n in re.findall(r"[-+]?[0-9]*\.?[0-9]+", d_str)]
+                numbers = [float(n) for n in re.findall(r"[-+]?[0-9]*\.?[0-9]+", numbers_str if 'numbers_str' in locals() else d_str)]
                 for i in range(0, len(numbers) - 1, 2):
                     coords_list.append([numbers[i], numbers[i + 1]])
                     
@@ -86,7 +86,6 @@ def resample_polyline_uniform(coords: np.ndarray, num_samples: int = 1024) -> np
     if total_len == 0:
         raise ValueError("Polyline has 0 total length.")
 
-    # Target equally spaced distance values along path
     target_dists = np.linspace(0.0, total_len, num_samples, endpoint=False)
 
     x_interp = np.interp(target_dists, cum_dist, coords[:, 0])
@@ -101,12 +100,10 @@ def compute_fourier_coefficients(points: np.ndarray, num_harmonics: int = 150):
     Fourier Transform (DFT). Returns sorted epicycles ordered by radius.
     """
     N = len(points)
-    # Convert 2D coordinates into complex plane values
     z = points[:, 0] + 1j * points[:, 1]
 
-    # Compute FFT
     coeffs = np.fft.fft(z) / N
-    freqs = np.fft.fftfreq(N, d=1.0) * N  # Integer frequency indices (-N/2 to N/2-1)
+    freqs = np.fft.fftfreq(N, d=1.0) * N
 
     epicycles = []
     for freq, coeff in zip(freqs, coeffs):
@@ -120,10 +117,8 @@ def compute_fourier_coefficients(points: np.ndarray, num_harmonics: int = 150):
             "phase": phase
         })
 
-    # Sort epicycles by descending radius for smoother visual epicycle nesting
     epicycles.sort(key=lambda item: item["radius"], reverse=True)
 
-    # Restrict to specified number of largest harmonics (keeping DC component)
     if num_harmonics is not None and num_harmonics < len(epicycles):
         epicycles = epicycles[:num_harmonics]
 
@@ -136,6 +131,9 @@ def animate_fourier_drawing(
     output_anim_path: str = None,
     total_frames: int = 500,
     fps: int = 30,
+    speed: float = 1.0,
+    save_png: bool = False,
+    png_path: str = None,
     trail_color: str = "black",
     epicycle_color: str = "#888888",
     show_window: bool = True
@@ -156,12 +154,10 @@ def animate_fourier_drawing(
     ax.set_aspect("equal")
     plt.axis("off")
 
-    # Animation artist primitives
     trail_line, = ax.plot([], [], color=trail_color, lw=1.6, solid_capstyle="round")
     vectors_line, = ax.plot([], [], color="#444444", lw=0.9, alpha=0.7)
     draw_point, = ax.plot([], [], marker="o", markersize=4, color="crimson")
 
-    # Render epicycle circles dynamically via Circle patches
     max_circles_to_draw = min(60, len(epicycles))
     circle_patches = [
         plt.Circle((0, 0), 1.0, color=epicycle_color, fill=False, lw=0.6, alpha=0.35)
@@ -171,7 +167,10 @@ def animate_fourier_drawing(
         ax.add_patch(cp)
 
     drawn_x, drawn_y = [], []
-    t_vals = np.linspace(0, 2 * np.pi, total_frames, endpoint=False)
+    
+    # Adjust total frames based on the speed multiplier so the animation loops faster
+    actual_frames = max(int(total_frames / speed), 1)
+    t_vals = np.linspace(0, 2 * np.pi, actual_frames, endpoint=False)
 
     def init():
         trail_line.set_data([], [])
@@ -185,7 +184,6 @@ def animate_fourier_drawing(
     def update(frame):
         t = t_vals[frame]
 
-        # Epicycle coordinate chaining
         curr_x = 0.0
         curr_y = 0.0
         vector_xs = [curr_x]
@@ -205,12 +203,10 @@ def animate_fourier_drawing(
             vector_xs.append(curr_x)
             vector_ys.append(curr_y)
 
-            # Update visible circles
             if i < max_circles_to_draw:
                 circle_patches[i].set_center((prev_x, prev_y))
                 circle_patches[i].set_radius(epi["radius"])
 
-        # Track pen coordinates
         drawn_x.append(curr_x)
         drawn_y.append(curr_y)
 
@@ -223,7 +219,7 @@ def animate_fourier_drawing(
     ani = animation.FuncAnimation(
         fig,
         update,
-        frames=total_frames,
+        frames=actual_frames,
         init_func=init,
         blit=True,
         interval=1000.0 / fps
@@ -238,12 +234,40 @@ def animate_fourier_drawing(
                 codec="libx264", 
                 extra_args=["-pix_fmt", "yuv420p"]
             )
+            # Fixed: do not pass fps here since it's already in the writer instance
             ani.save(output_anim_path, writer=writer)
         else:
-            # Default to GIF with explicit fps
             writer = animation.PillowWriter(fps=fps)
-            ani.save(output_anim_path, writer=writer, fps=fps)
+            # Fixed: removed fps=fps from save()
+            ani.save(output_anim_path, writer=writer)
         print(f"Animation saved: {output_anim_path}")
+
+    # Render and save the completed line as PNG if requested
+    if save_png and png_path:
+        print(f"Exporting final frame to: {png_path}...")
+        png_fig, png_ax = plt.subplots(figsize=(8, 8), dpi=200)
+        png_fig.patch.set_facecolor("#ffffff")
+        png_ax.set_facecolor("#ffffff")
+        png_ax.set_xlim(min_x - pad_x, max_x + pad_x)
+        png_ax.set_ylim(max_y + pad_y, min_y - pad_y)
+        png_ax.set_aspect("equal")
+        png_ax.axis("off")
+
+        # Compute all final points of the loop
+        t_final = np.linspace(0, 2 * np.pi, total_frames, endpoint=True)
+        final_x = np.zeros_like(t_final)
+        final_y = np.zeros_like(t_final)
+
+        for epi in epicycles:
+            freq = epi["freq"]
+            angle = freq * t_final + epi["phase"]
+            final_x += epi["radius"] * np.cos(angle)
+            final_y += epi["radius"] * np.sin(angle)
+
+        png_ax.plot(final_x, final_y, color=trail_color, lw=1.6, solid_capstyle="round")
+        png_fig.savefig(png_path, bbox_inches="tight", pad_inches=0.1)
+        plt.close(png_fig)
+        print(f"Final drawing saved: {png_path}")
 
     if show_window:
         plt.show()
@@ -286,9 +310,20 @@ def main():
         help="Animation frames per second (default: 30)"
     )
     parser.add_argument(
+        "-s", "--speed",
+        type=float,
+        default=1.0,
+        help="Speed multiplier for animation playback (e.g. 2.0 is 2x faster, 0.5 is half speed, default: 1.0)"
+    )
+    parser.add_argument(
         "-o", "--output",
         default=None,
         help="Optional output animation filename (.gif or .mp4)"
+    )
+    parser.add_argument(
+        "--save-png",
+        action="store_true",
+        help="Save the fully reconstructed static drawing as a PNG image using the same base name"
     )
     parser.add_argument(
         "--no-show",
@@ -298,6 +333,13 @@ def main():
 
     args = parser.parse_args()
 
+    # Determine PNG output path
+    png_path = None
+    if args.save_png:
+        base_target = args.output if args.output else args.polyline_file
+        base_name, _ = os.path.splitext(base_target)
+        png_path = f"{base_name}.png"
+
     try:
         print(f"[1/4] Loading polyline from: {args.polyline_file}...")
         coords = load_polyline_coordinates(args.polyline_file)
@@ -306,20 +348,23 @@ def main():
         print(f"[2/4] Resampling polyline to {args.samples} uniform spatial samples...")
         resampled = resample_polyline_uniform(coords, num_samples=args.samples)
 
-        # Automatically ensure enough frames to cover the full length/samples if not explicitly provided
         total_frames = args.frames if args.frames is not None else max(args.samples, 1200)
 
         print(f"[3/4] Computing Discrete Fourier Transform (DFT)...")
         epicycles, N = compute_fourier_coefficients(resampled, num_harmonics=args.harmonics)
         print(f"      Generated {len(epicycles)} epicycle components sorted by radius.")
 
-        print(f"[4/4] Starting animation engine ({total_frames} frames at {args.fps} FPS)...")
+        actual_frames = max(int(total_frames / args.speed), 1)
+        print(f"[4/4] Starting animation engine ({actual_frames} frames at {args.fps} FPS, {args.speed}x speed)...")
         animate_fourier_drawing(
             epicycles=epicycles,
             resampled_points=resampled,
             output_anim_path=args.output,
             total_frames=total_frames,
             fps=args.fps,
+            speed=args.speed,
+            save_png=args.save_png,
+            png_path=png_path,
             show_window=not args.no_show
         )
 

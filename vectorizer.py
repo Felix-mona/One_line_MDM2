@@ -6,17 +6,65 @@ from scipy.ndimage import convolve
 from skimage.morphology import skeletonize
 
 
-def remove_small_specks(binary_mask: np.ndarray, min_area: int = 12) -> np.ndarray:
-    """Removes isolated connected components smaller than min_area pixels."""
-    if min_area <= 1:
+def filter_distant_specks(
+    binary_mask: np.ndarray,
+    min_area: int = 12,
+    dist_threshold: float = 40.0,
+    dist_min_area_ratio: float = 0.005,
+) -> np.ndarray:
+    """Removes small isolated pixel clusters, applying stricter area filtering to clusters far from the main drawing.
+
+    Args:
+        binary_mask: Binary image array (255 = ink, 0 = background).
+        min_area: Absolute minimum pixel area required to keep any component.
+        dist_threshold: Distance in pixels beyond which a component is considered 'far'.
+        dist_min_area_ratio: Minimum component area relative to the primary drawing body
+                             needed to survive when located beyond dist_threshold.
+    """
+    if min_area <= 1 and dist_threshold <= 0:
         return binary_mask
 
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        binary_mask, connectivity=8
+    )
+
+    if num_labels <= 2:
+        return binary_mask
+
+    # Label 0 is background; find the largest foreground component (main body)
+    fg_areas = stats[1:, cv2.CC_STAT_AREA]
+    largest_label = 1 + int(np.argmax(fg_areas))
+    main_area = stats[largest_label, cv2.CC_STAT_AREA]
+
+    # Compute Euclidean distance map from the primary body outward
+    main_body_mask = (labels == largest_label).astype(np.uint8)
+    inv_main_body = cv2.bitwise_not(main_body_mask * 255)
+    dist_to_main = cv2.distanceTransform(inv_main_body, cv2.DIST_L2, 5)
+
     cleaned = np.zeros_like(binary_mask)
+    # Always retain the main body
+    cleaned[labels == largest_label] = 255
 
     for i in range(1, num_labels):
-        if stats[i, cv2.CC_STAT_AREA] >= min_area:
-            cleaned[labels == i] = 255
+        if i == largest_label:
+            continue
+
+        area = stats[i, cv2.CC_STAT_AREA]
+
+        # 1. Absolute speck cutoff
+        if area < min_area:
+            continue
+
+        # 2. Check distance from the main body
+        comp_dists = dist_to_main[labels == i]
+        min_dist = np.min(comp_dists)
+
+        if min_dist > dist_threshold:
+            # If it is isolated far away, enforce a higher relative area requirement
+            if area < (main_area * dist_min_area_ratio):
+                continue
+
+        cleaned[labels == i] = 255
 
     return cleaned
 
@@ -26,6 +74,8 @@ def image_to_binary_mask(
     mode: str = "primal",
     threshold_val: int = 200,
     min_speck_area: int = 12,
+    dist_threshold: float = 40.0,
+    dist_min_area_ratio: float = 0.005,
     save_preview_path: str = None,
 ) -> np.ndarray:
     """Converts any image or digital drawing into a binary mask (255 = ink, 0 = background).
@@ -52,7 +102,12 @@ def image_to_binary_mask(
 
         if np.min(gray) > threshold_val and np.min(a) < 10:
             _, binary_ink = cv2.threshold(a, 10, 255, cv2.THRESH_BINARY)
-            return remove_small_specks(binary_ink, min_area=min_speck_area)
+            return filter_distant_specks(
+                binary_ink,
+                min_area=min_speck_area,
+                dist_threshold=dist_threshold,
+                dist_min_area_ratio=dist_min_area_ratio,
+            )
     elif img.ndim == 3:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     else:
@@ -101,7 +156,12 @@ def image_to_binary_mask(
     else:
         raise ValueError(f"Unknown mode '{mode}'. Choose 'primal', 'minimal', 'xdog', 'canny', or 'drawing'.")
 
-    cleaned_ink = remove_small_specks(binary_ink, min_area=min_speck_area)
+    cleaned_ink = filter_distant_specks(
+        binary_ink,
+        min_area=min_speck_area,
+        dist_threshold=dist_threshold,
+        dist_min_area_ratio=dist_min_area_ratio,
+    )
 
     if save_preview_path:
         cv2.imwrite(save_preview_path, 255 - cleaned_ink)
@@ -117,9 +177,11 @@ def skeletonize_mask(binary_mask: np.ndarray, method: str = "lee") -> np.ndarray
 
 def extract_skeleton_topology(skeleton: np.ndarray, junction_dilation_ksize: int = 3):
     """Detects endpoints, junction clusters, and traces 8-connected edge paths in one pass.
-    
-    Dilates the junction candidate mask to merge dual 3-way split artifacts 
-    back into a single crossing node.
+
+    Returns:
+        endpoints (list of tuple): [(x, y), ...] degree-1 nodes.
+        junctions (list of tuple): [(x, y), ...] degree >= 3 cluster centroids.
+        edges (list of dict): [{'start_node': (x, y), 'end_node': (x, y), 'path': [...]}, ...]
     """
     height, width = skeleton.shape
     skel_binary = (skeleton > 0).astype(np.uint8)
@@ -289,6 +351,7 @@ def extract_skeleton_topology(skeleton: np.ndarray, junction_dilation_ksize: int
             })
 
     return endpoints, junctions, edges
+
 
 def rdp_simplify(points: list, epsilon: float = 0.5) -> list:
     """Simplifies a sequence of (x, y) coordinates using Ramer-Douglas-Peucker (RDP)."""

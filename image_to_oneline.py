@@ -14,6 +14,7 @@ from vectorizer import (
 )
 from graph_solver import (
     build_graph_from_polylines,
+    prune_graph_noise,
     connect_disjoint_components,
     make_semi_eulerian,
     smooth_eulerian_trail,
@@ -31,13 +32,17 @@ def image_to_continuous_polyline(
     threshold_val: int = 200,
     min_speck_area: int = None,
     min_edge_pixels: int = None,
+    dist_threshold: float = 40.0,
+    dist_min_area_ratio: float = 0.005,
+    min_dead_end_length: float = 12.0,
+    min_cycle_length: float = 25.0,
     epsilon: float = 1.0,
     max_angle_deg: float = 60.0,
     length_limit_pct: float = 0.10,
     interior_penalty: float = 40.0,
     stroke_width: float = 1.5,
 ) -> list:
-    """End-to-end pipeline: converts any image into a single continuous (x, y) polyline."""
+    """End-to-end pipeline: converts an image into a single continuous smooth polyline."""
     if min_speck_area is None:
         min_speck_area = 110 if mode == "minimal" else (1 if mode == "drawing" else 12)
     if min_edge_pixels is None:
@@ -49,6 +54,8 @@ def image_to_continuous_polyline(
         mode=mode,
         threshold_val=threshold_val,
         min_speck_area=min_speck_area,
+        dist_threshold=dist_threshold,
+        dist_min_area_ratio=dist_min_area_ratio,
         save_preview_path=preview_png_path,
     )
     height, width = binary.shape
@@ -79,6 +86,13 @@ def image_to_continuous_polyline(
         length_limit_pct=length_limit_pct,
     )
 
+    # Prune dangling antenna whiskers and tiny spurious loop artifacts
+    G = prune_graph_noise(
+        G,
+        min_dead_end_length=min_dead_end_length,
+        min_cycle_length=min_cycle_length,
+    )
+
     num_components = nx.number_connected_components(G)
     if num_components > 1:
         G = connect_disjoint_components(G, interior_penalty=interior_penalty)
@@ -91,10 +105,11 @@ def image_to_continuous_polyline(
     retrace_pct = ((semi_len - orig_len) / max(1.0, orig_len)) * 100.0
     print(f"      Duplicated {G_semi.number_of_edges() - G.number_of_edges()} edges (+{retrace_pct:.1f}% retraced length).")
 
-    print("[6/6] Computing Eulerian trail and reconstructing continuous polyline...")
+    print("[6/6] Computing smooth Eulerian trail and reconstructing continuous polyline...")
     edge_trail = smooth_eulerian_trail(G_semi, start_node=start_node)
     polyline = reconstruct_full_polyline_from_edges(G_semi, edge_trail)
     print(f"      Generated continuous polyline with {len(polyline)} (x, y) vertices.")
+
     if output_svg_path:
         polyline_to_svg(polyline, width, height, output_svg_path, stroke_width=stroke_width)
         print(f"      Saved continuous single-line SVG to: {output_svg_path}")
@@ -115,11 +130,14 @@ def main():
     parser.add_argument("input", nargs="?", default="images/orb.png", help="Path to input image")
     parser.add_argument("-o", "--output", default=None, help="Output single-line SVG path")
     parser.add_argument("-c", "--coords", default=None, help="Optional path to save (x, y) coordinates (.csv, .txt, or .npy)")
-    parser.add_argument("-m", "--mode", choices=["primal", "minimal", "xdog", "canny", "drawing "], default="drawing")
+    parser.add_argument("-m", "--mode", choices=["primal", "minimal", "xdog", "canny", "drawing"], default="drawing")
     parser.add_argument("-e", "--epsilon", type=float, default=1.0, help="RDP simplification tolerance (px)")
     parser.add_argument("--angle", type=float, default=60.0, help="Corner angle split threshold (deg)")
     parser.add_argument("--len-pct", type=float, default=0.10, help="Max edge length as fraction of canvas size")
     parser.add_argument("--penalty", type=float, default=40.0, help="Interior node penalty for MST bridging")
+    parser.add_argument("--dist-thresh", type=float, default=40.0, help="Distance threshold for speck filtering (px)")
+    parser.add_argument("--prune-dead-end", type=float, default=12.0, help="Minimum dead-end whisker length (px)")
+    parser.add_argument("--prune-cycle", type=float, default=25.0, help="Minimum cycle length to retain (px)")
     parser.add_argument("-w", "--stroke-width", type=float, default=1.5, help="SVG stroke width")
     parser.add_argument("-p", "--preview", default=None, help="Optional path to save binary PNG preview")
     parser.add_argument("--sketch-svg", default=None, help="Optional path to save pre-bridged primal sketch SVG")
@@ -142,6 +160,9 @@ def main():
             max_angle_deg=args.angle,
             length_limit_pct=args.len_pct,
             interior_penalty=args.penalty,
+            dist_threshold=args.dist_thresh,
+            min_dead_end_length=args.prune_dead_end,
+            min_cycle_length=args.prune_cycle,
             stroke_width=args.stroke_width,
         )
     except Exception as e:

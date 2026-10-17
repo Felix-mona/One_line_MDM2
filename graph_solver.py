@@ -215,6 +215,55 @@ def build_graph_from_polylines(
     return G
 
 
+def prune_graph_noise(
+    G: nx.MultiGraph,
+    min_dead_end_length: float = 12.0,
+    min_cycle_length: float = 25.0,
+) -> nx.MultiGraph:
+    """Removes short dangling antenna whiskers and tiny closed-loop artifacts."""
+    changed = True
+    while changed:
+        changed = False
+
+        # 1. Remove tiny self-loops or parallel micro-cycles
+        edges_to_remove = []
+        for u, v, k, data in G.edges(keys=True, data=True):
+            w = data.get("weight", 0.0)
+            if u == v and w < min_cycle_length:
+                edges_to_remove.append((u, v, k))
+            elif G.number_of_edges(u, v) > 1 and w < min_cycle_length:
+                edges_to_remove.append((u, v, k))
+
+        if edges_to_remove:
+            for u, v, k in edges_to_remove:
+                if G.has_edge(u, v, key=k):
+                    G.remove_edge(u, v, key=k)
+            changed = True
+
+        # 2. Prune short dead-end whiskers
+        nodes_to_prune = []
+        for n in list(G.nodes()):
+            if G.degree(n) == 1:
+                nbr = next(G.neighbors(n))
+                edge_data = min(G[n][nbr].values(), key=lambda d: d.get("weight", 0.0))
+                if edge_data.get("weight", 0.0) < min_dead_end_length:
+                    nodes_to_prune.append(n)
+
+        if nodes_to_prune:
+            for n in nodes_to_prune:
+                if G.has_node(n) and G.degree(n) <= 1:
+                    G.remove_node(n)
+            changed = True
+
+        # 3. Drop isolated nodes
+        isolated = [n for n in G.nodes() if G.degree(n) == 0]
+        if isolated:
+            G.remove_nodes_from(isolated)
+            changed = True
+
+    return G
+
+
 def svg_to_graph(
     svg_file: str,
     max_angle_deg: float = 60.0,
@@ -249,7 +298,6 @@ def connect_disjoint_components(
             return 0.0
         return interior_penalty
 
-    # Precompute coordinate and penalty arrays per component for vectorized cdist
     comp_coords = [
         np.array([G.nodes[n]["pos"] for n in comp], dtype=np.float64)
         for comp in components
@@ -304,7 +352,6 @@ def _match_odd_vertices_fast(odd_dist_mat: np.ndarray):
     K = odd_dist_mat.shape[0]
     num_pairs = (K - 2) // 2
 
-    # 1. Greedy initialization: sort all pairs by shortest distance
     iu, ju = np.triu_indices(K, k=1)
     order = np.argsort(odd_dist_mat[iu, ju])
 
@@ -321,11 +368,9 @@ def _match_odd_vertices_fast(odd_dist_mat: np.ndarray):
 
     unmatched = [i for i in range(K) if not matched_mask[i]]
 
-    # 2. Fast 2-Opt local refinement (uncrossing pairs & optimizing open endpoints)
     for _ in range(3):
         improved = False
 
-        # Check swaps between matched pairs and the 2 unmatched endpoints
         for p_idx in range(num_pairs):
             a, b = pairs[p_idx]
             curr_cost = odd_dist_mat[a, b]
@@ -340,7 +385,6 @@ def _match_odd_vertices_fast(odd_dist_mat: np.ndarray):
                     b, curr_cost = e, odd_dist_mat[a, e]
                     improved = True
 
-        # Check 2-opt swaps between pairs of matched edges
         for p1 in range(num_pairs):
             a, b = pairs[p1]
             dab = odd_dist_mat[a, b]
@@ -382,7 +426,6 @@ def make_semi_eulerian(G: nx.MultiGraph):
     if K == 2:
         return G.copy(), (odd_nodes[0], odd_nodes[1])
 
-    # 1. Build sparse adjacency matrix keeping the shortest edge between any pair of adjacent nodes
     N = len(nodes)
     min_edges = {}
     for u, v, data in G.edges(data=True):
@@ -403,18 +446,15 @@ def make_semi_eulerian(G: nx.MultiGraph):
 
     adj_csr = csr_matrix((weights, (rows, cols)), shape=(N, N))
 
-    # 2. Run compiled C Dijkstra from all odd vertices simultaneously
     odd_indices = [node_to_idx[n] for n in odd_nodes]
     dist_matrix, predecessors = dijkstra(
         adj_csr, directed=False, indices=odd_indices, return_predecessors=True
     )
     odd_dist_mat = dist_matrix[:, odd_indices]
 
-    # 3. Match K - 2 odd nodes and leave 2 optimal open endpoints
     matched_pairs, (end_i, end_j) = _match_odd_vertices_fast(odd_dist_mat)
     best_endpoints = (odd_nodes[end_i], odd_nodes[end_j])
 
-    # 4. Reconstruct paths from predecessor matrix ONLY for the matched pairs
     G_semi = G.copy()
     for i, j in matched_pairs:
         src_node_idx = odd_indices[i]
@@ -436,38 +476,26 @@ def make_semi_eulerian(G: nx.MultiGraph):
 
 
 def get_edge_outgoing_tangent(G: nx.MultiGraph, u, v, k) -> np.ndarray:
-    """Returns the directional vector of edge (u, v, k) heading away from u towards v."""
+    """Returns the directional vector of edge (u, v, k) leaving node u towards v."""
     data = G[u][v][k]
-    # In build_graph_from_polylines:
-    # start_tangent points into the edge from u to v
-    # end_tangent points into v from u
-    if "start_tangent" in data:
-        path = data.get("path")
-        if path and len(path) >= 2:
-            # Check orientation of the internal path relative to u
-            p0 = np.array(path[0], dtype=np.float64)
-            u_pt = np.array(u, dtype=np.float64)
-            if np.allclose(p0, u_pt, atol=1e-5):
-                return np.array(path[1], dtype=np.float64) - p0
-            else:
-                p_last = np.array(path[-1], dtype=np.float64)
-                return np.array(path[-2], dtype=np.float64) - p_last
-
-        # Fallback to coordinate difference
-        return np.array(v, dtype=np.float64) - np.array(u, dtype=np.float64)
+    path = data.get("path")
+    if path and len(path) >= 2:
+        p0 = np.array(path[0], dtype=np.float64)
+        u_pt = np.array(u, dtype=np.float64)
+        if np.allclose(p0, u_pt, atol=1e-5):
+            return np.array(path[1], dtype=np.float64) - p0
+        else:
+            p_last = np.array(path[-1], dtype=np.float64)
+            return np.array(path[-2], dtype=np.float64) - p_last
 
     return np.array(v, dtype=np.float64) - np.array(u, dtype=np.float64)
 
 
 def smooth_eulerian_trail(G_semi: nx.MultiGraph, start_node) -> list:
-    """
-    Finds an Eulerian path/circuit that minimizes turning deviation at junctions.
-    Returns: list of (u, v, edge_key) tuples representing the exact edge sequence.
-    """
+    """Finds an Eulerian path/circuit that minimizes directional deflection at junctions."""
     adj = {n: list(G_semi.edges(n, keys=True)) for n in G_semi.nodes()}
     used_edges = set()
 
-    # Stack stores: (current_node, incoming_vector_or_None)
     stack = [(start_node, None)]
     edge_stack = []
     final_edge_trail = []
@@ -475,7 +503,6 @@ def smooth_eulerian_trail(G_semi: nx.MultiGraph, start_node) -> list:
     while stack:
         curr, incoming_vec = stack[-1]
 
-        # Filter out already consumed edges
         valid_candidates = []
         for u, v, k in adj[curr]:
             edge_id = (min(u, v), max(u, v), k)
@@ -485,10 +512,8 @@ def smooth_eulerian_trail(G_semi: nx.MultiGraph, start_node) -> list:
 
         if valid_candidates:
             if incoming_vec is None or len(valid_candidates) == 1:
-                # No previous direction (starting point) or single choice
                 chosen_edge = valid_candidates.pop()
             else:
-                # Rank candidates by smallest angular deviation from the incoming vector
                 def angle_cost(edge):
                     u, v, k = edge
                     outgoing_vec = get_edge_outgoing_tangent(G_semi, u, v, k)
@@ -500,7 +525,6 @@ def smooth_eulerian_trail(G_semi: nx.MultiGraph, start_node) -> list:
             u, nbr, k = chosen_edge
             used_edges.add((min(u, nbr), max(u, nbr), k))
 
-            # The next incoming vector into 'nbr' is the tangent approaching 'nbr'
             path = G_semi[u][nbr][k].get("path", [u, nbr])
             if np.allclose(path[0], u, atol=1e-5):
                 next_in_vec = np.array(path[-1], dtype=np.float64) - np.array(path[-2], dtype=np.float64)
@@ -517,8 +541,9 @@ def smooth_eulerian_trail(G_semi: nx.MultiGraph, start_node) -> list:
     final_edge_trail.reverse()
     return final_edge_trail
 
+
 def reconstruct_full_polyline_from_edges(G_semi: nx.MultiGraph, edge_trail: list) -> list:
-    """Stitches edge transitions back into the full sequence of coordinates."""
+    """Stitches edge transitions back into full continuous coordinates without parallel edge ambiguity."""
     if not edge_trail:
         return []
 
