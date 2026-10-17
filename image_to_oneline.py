@@ -16,8 +16,8 @@ from graph_solver import (
     build_graph_from_polylines,
     connect_disjoint_components,
     make_semi_eulerian,
-    simple_eulerian_trail,
-    reconstruct_full_polyline,
+    smooth_eulerian_trail,
+    reconstruct_full_polyline_from_edges,
 )
 
 
@@ -92,10 +92,9 @@ def image_to_continuous_polyline(
     print(f"      Duplicated {G_semi.number_of_edges() - G.number_of_edges()} edges (+{retrace_pct:.1f}% retraced length).")
 
     print("[6/6] Computing Eulerian trail and reconstructing continuous polyline...")
-    node_trail = simple_eulerian_trail(G_semi, start_node=start_node)
-    polyline = reconstruct_full_polyline(G_semi, node_trail)
+    edge_trail = smooth_eulerian_trail(G_semi, start_node=start_node)
+    polyline = reconstruct_full_polyline_from_edges(G_semi, edge_trail)
     print(f"      Generated continuous polyline with {len(polyline)} (x, y) vertices.")
-
     if output_svg_path:
         polyline_to_svg(polyline, width, height, output_svg_path, stroke_width=stroke_width)
         print(f"      Saved continuous single-line SVG to: {output_svg_path}")
@@ -116,7 +115,7 @@ def main():
     parser.add_argument("input", nargs="?", default="images/orb.png", help="Path to input image")
     parser.add_argument("-o", "--output", default=None, help="Output single-line SVG path")
     parser.add_argument("-c", "--coords", default=None, help="Optional path to save (x, y) coordinates (.csv, .txt, or .npy)")
-    parser.add_argument("-m", "--mode", choices=["primal", "minimal", "xdog", "canny", "drawing"], default="primal")
+    parser.add_argument("-m", "--mode", choices=["primal", "minimal", "xdog", "canny", "drawing "], default="drawing")
     parser.add_argument("-e", "--epsilon", type=float, default=1.0, help="RDP simplification tolerance (px)")
     parser.add_argument("--angle", type=float, default=60.0, help="Corner angle split threshold (deg)")
     parser.add_argument("--len-pct", type=float, default=0.10, help="Max edge length as fraction of canvas size")

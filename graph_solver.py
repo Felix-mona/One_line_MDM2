@@ -435,74 +435,101 @@ def make_semi_eulerian(G: nx.MultiGraph):
     return G_semi, best_endpoints
 
 
-def simple_eulerian_trail(G_semi: nx.MultiGraph, start_node) -> list:
-    """Finds a valid Eulerian path/circuit in O(E) time using Hierholzer's algorithm."""
-    adj = {n: [] for n in G_semi.nodes()}
-    for u, v, k in G_semi.edges(keys=True):
-        adj[u].append((v, k))
-        if u != v:
-            adj[v].append((u, k))
+def get_edge_outgoing_tangent(G: nx.MultiGraph, u, v, k) -> np.ndarray:
+    """Returns the directional vector of edge (u, v, k) heading away from u towards v."""
+    data = G[u][v][k]
+    # In build_graph_from_polylines:
+    # start_tangent points into the edge from u to v
+    # end_tangent points into v from u
+    if "start_tangent" in data:
+        path = data.get("path")
+        if path and len(path) >= 2:
+            # Check orientation of the internal path relative to u
+            p0 = np.array(path[0], dtype=np.float64)
+            u_pt = np.array(u, dtype=np.float64)
+            if np.allclose(p0, u_pt, atol=1e-5):
+                return np.array(path[1], dtype=np.float64) - p0
+            else:
+                p_last = np.array(path[-1], dtype=np.float64)
+                return np.array(path[-2], dtype=np.float64) - p_last
 
+        # Fallback to coordinate difference
+        return np.array(v, dtype=np.float64) - np.array(u, dtype=np.float64)
+
+    return np.array(v, dtype=np.float64) - np.array(u, dtype=np.float64)
+
+
+def smooth_eulerian_trail(G_semi: nx.MultiGraph, start_node) -> list:
+    """
+    Finds an Eulerian path/circuit that minimizes turning deviation at junctions.
+    Returns: list of (u, v, edge_key) tuples representing the exact edge sequence.
+    """
+    adj = {n: list(G_semi.edges(n, keys=True)) for n in G_semi.nodes()}
     used_edges = set()
-    stack = [start_node]
-    trail = []
+
+    # Stack stores: (current_node, incoming_vector_or_None)
+    stack = [(start_node, None)]
+    edge_stack = []
+    final_edge_trail = []
 
     while stack:
-        curr = stack[-1]
-        nbr_list = adj[curr]
+        curr, incoming_vec = stack[-1]
 
-        # Pop already-used edges in O(1) amortized time
-        while nbr_list and (min(curr, nbr_list[-1][0]), max(curr, nbr_list[-1][0]), nbr_list[-1][1]) in used_edges:
-            nbr_list.pop()
+        # Filter out already consumed edges
+        valid_candidates = []
+        for u, v, k in adj[curr]:
+            edge_id = (min(u, v), max(u, v), k)
+            if edge_id not in used_edges:
+                valid_candidates.append((u, v, k))
+        adj[curr] = valid_candidates
 
-        if nbr_list:
-            nbr, k = nbr_list.pop()
-            used_edges.add((min(curr, nbr), max(curr, nbr), k))
-            stack.append(nbr)
+        if valid_candidates:
+            if incoming_vec is None or len(valid_candidates) == 1:
+                # No previous direction (starting point) or single choice
+                chosen_edge = valid_candidates.pop()
+            else:
+                # Rank candidates by smallest angular deviation from the incoming vector
+                def angle_cost(edge):
+                    u, v, k = edge
+                    outgoing_vec = get_edge_outgoing_tangent(G_semi, u, v, k)
+                    return compute_angle_deg(incoming_vec, outgoing_vec)
+
+                chosen_edge = min(valid_candidates, key=angle_cost)
+                valid_candidates.remove(chosen_edge)
+
+            u, nbr, k = chosen_edge
+            used_edges.add((min(u, nbr), max(u, nbr), k))
+
+            # The next incoming vector into 'nbr' is the tangent approaching 'nbr'
+            path = G_semi[u][nbr][k].get("path", [u, nbr])
+            if np.allclose(path[0], u, atol=1e-5):
+                next_in_vec = np.array(path[-1], dtype=np.float64) - np.array(path[-2], dtype=np.float64)
+            else:
+                next_in_vec = np.array(path[0], dtype=np.float64) - np.array(path[1], dtype=np.float64)
+
+            edge_stack.append((u, nbr, k))
+            stack.append((nbr, next_in_vec))
         else:
-            trail.append(stack.pop())
+            stack.pop()
+            if edge_stack:
+                final_edge_trail.append(edge_stack.pop())
 
-    trail.reverse()
-    return trail
+    final_edge_trail.reverse()
+    return final_edge_trail
 
-
-def reconstruct_full_polyline(G_semi: nx.MultiGraph, node_trail: list) -> list:
-    """Stitches node transitions back into the exact curved polyline coordinates."""
-    if len(node_trail) < 2:
+def reconstruct_full_polyline_from_edges(G_semi: nx.MultiGraph, edge_trail: list) -> list:
+    """Stitches edge transitions back into the full sequence of coordinates."""
+    if not edge_trail:
         return []
 
-    edge_tracker = {}
-    for u, v, k, data in G_semi.edges(keys=True, data=True):
-        edge_id = (min(u, v), max(u, v), k)
-        edge_tracker[edge_id] = {
-            "path": data.get("path", [u, v]),
-            "used": False,
-        }
+    full_coords = [edge_trail[0][0]]
 
-    full_coords = [node_trail[0]]
-
-    for i in range(len(node_trail) - 1):
-        u, v = node_trail[i], node_trail[i + 1]
-
-        matched_edge_id = None
-        for k in G_semi[u][v]:
-            edge_id = (min(u, v), max(u, v), k)
-            if not edge_tracker[edge_id]["used"]:
-                matched_edge_id = edge_id
-                break
-
-        if matched_edge_id is not None:
-            edge_tracker[matched_edge_id]["used"] = True
-            raw_path = edge_tracker[matched_edge_id]["path"]
-        else:
-            best_k = min(G_semi[u][v].keys(), key=lambda k: G_semi[u][v][k].get("weight", 1.0))
-            raw_path = G_semi[u][v][best_k].get("path", [u, v])
-
+    for u, v, k in edge_trail:
+        raw_path = G_semi[u][v][k].get("path", [u, v])
         p_start = np.array(raw_path[0])
-        p_end = np.array(raw_path[-1])
         u_arr = np.array(u)
 
-        if np.linalg.norm(p_start - u_arr) <= np.linalg.norm(p_end - u_arr):
+        if np.linalg.norm(p_start - u_arr) <= 1e-5:
             segment = raw_path[1:]
         else:
             segment = list(reversed(raw_path))[1:]

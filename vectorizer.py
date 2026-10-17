@@ -115,13 +115,11 @@ def skeletonize_mask(binary_mask: np.ndarray, method: str = "lee") -> np.ndarray
     return (skeleton_bool.astype(np.uint8)) * 255
 
 
-def extract_skeleton_topology(skeleton: np.ndarray):
+def extract_skeleton_topology(skeleton: np.ndarray, junction_dilation_ksize: int = 3):
     """Detects endpoints, junction clusters, and traces 8-connected edge paths in one pass.
-
-    Returns:
-        endpoints (list of tuple): [(x, y), ...] degree-1 nodes.
-        junctions (list of tuple): [(x, y), ...] degree >= 3 cluster centroids.
-        edges (list of dict): [{'start_node': (x, y), 'end_node': (x, y), 'path': [...]}, ...]
+    
+    Dilates the junction candidate mask to merge dual 3-way split artifacts 
+    back into a single crossing node.
     """
     height, width = skeleton.shape
     skel_binary = (skeleton > 0).astype(np.uint8)
@@ -143,10 +141,26 @@ def extract_skeleton_topology(skeleton: np.ndarray):
         node_pixels[current_id] = [(ex, ey)]
         current_id += 1
 
-    # 2. Extract and cluster degree >= 3 junctions
+    # 2. Extract, dilate, and cluster degree >= 3 junctions
     raw_junction_mask = (neighbor_count >= 3).astype(np.uint8)
+
+    # Dilate junction mask along the skeleton to bridge short 1-3 px "flat" H-segments
+    if junction_dilation_ksize > 1:
+        dilation_kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (junction_dilation_ksize, junction_dilation_ksize)
+        )
+        dilated_junctions = cv2.dilate(raw_junction_mask, dilation_kernel)
+        # Constrain dilation strictly to skeleton pixels so non-ink background isn't captured
+        merged_junction_mask = (dilated_junctions > 0) & (skel_binary > 0)
+        # Never swallow degree-1 endpoints into an expanded junction cluster
+        for ex, ey in endpoints:
+            merged_junction_mask[ey, ex] = False
+        merged_junction_mask = merged_junction_mask.astype(np.uint8)
+    else:
+        merged_junction_mask = raw_junction_mask
+
     num_labels, labels, _, centroids = cv2.connectedComponentsWithStats(
-        raw_junction_mask, connectivity=8
+        merged_junction_mask, connectivity=8
     )
 
     junctions = []
@@ -276,8 +290,7 @@ def extract_skeleton_topology(skeleton: np.ndarray):
 
     return endpoints, junctions, edges
 
-
-def rdp_simplify(points: list, epsilon: float = 1.0) -> list:
+def rdp_simplify(points: list, epsilon: float = 0.5) -> list:
     """Simplifies a sequence of (x, y) coordinates using Ramer-Douglas-Peucker (RDP)."""
     if len(points) <= 2:
         return points
@@ -311,7 +324,7 @@ def rdp_simplify(points: list, epsilon: float = 1.0) -> list:
     return [points[0], points[-1]]
 
 
-def simplify_all_edges(edges: list, epsilon: float = 1.0) -> list:
+def simplify_all_edges(edges: list, epsilon: float = 0.5) -> list:
     """Applies RDP decimation across all traced edges."""
     simplified = []
     for edge in edges:
