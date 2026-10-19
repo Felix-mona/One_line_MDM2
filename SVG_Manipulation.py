@@ -44,8 +44,8 @@ def sample_paths(paths, k):
 
     return np.array(points)
 
-paths, attributes = import_svg('example_images/circle.svg')
+paths, attributes = import_svg('example_images/smiley.svg')
 
-points = sample_paths(paths, 100)
+points = sample_paths(paths, 1)
 plt.scatter(points[:, 0], points[:, 1])
 plt.show()
