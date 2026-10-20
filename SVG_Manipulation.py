@@ -45,10 +45,10 @@ def sample_paths(paths, k):
 
     return np.array(points)
 
-paths, attributes = import_svg('images/icecream_oneline.svg')
+paths, attributes = import_svg('images/drawing_oneline.svg')
 
-points = sample_paths(paths, 100)
-plt.scatter(points[:, 0], points[:, 1])
+points = sample_paths(paths, 1000)
+plt.scatter(points[:, 0], points[:, 1], s=0.1, color='black')  # Scatter plot of sampled points
 
 plt.gca().invert_yaxis()  # Invert the y-axis to match SVG coordinate system
 plt.axis('equal')  # Set equal aspect ratio
