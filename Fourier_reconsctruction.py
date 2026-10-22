@@ -29,6 +29,8 @@ def fourier_coeffs(z):
     """"
     Input:
     - z: a list of imaginary numbers representing the path at distance s from start, [(x + yj)]
+
+
     Output:
     - coefficients, List of complex numbers representing the coefficients of the fourier transform
     - freq_channels, List of integers that are the whole number frequencies present in the curve.
@@ -41,27 +43,35 @@ def fourier_coeffs(z):
 
  
  
-##def filter_coeffs(coefficients, cutoff=None, filter_type=None, filter_order=None):
+def filter_coeffs(coefficients, cutoff=None):
     """
     Input:
-    - coefficients: list of complex numbers representing the coefficients of the fourier transform, must be a list where the x[0] is the zero frequency term
-    - cutoff: float, the cutoff frequency for the filter
-    - filter_type: str, the type of filter to apply ('lowpass', 'highpass', 'bandpass', 'bandstop')
-    - filter_order: int, the order of the filter to apply
+    - coefficients: array of complex numbers representing the coefficients of the fourier transform, must be a list where the x[0] is the zero frequency term
+    - cutoff: Integer, the cutoff frequency for the filter, highest value it can take is N/2 the sample amount of the curve
+
+
     Output:
     - filtered_coefficients: list of complex numbers representing the filtered coefficients of the fourier transform, must be a list where the x[0] is the zero frequency term
     """
+    coefficients = np.asarray(coefficients)
     ##loop to handle if there are no params given
-    if cutoff is None or filter_type is None or filter_order is None:
+    if cutoff is None:
         return coefficients
 
-    pass
+    n = len(coefficients)
+    cutoff = min(int(cutoff), (n-1)//2 )
+
+    fourier_filtered = coefficients.copy() # make a copy as to not change the original
+    
+    fourier_filtered[cutoff + 1 : n - cutoff] = 0
+
+    return fourier_filtered
 
 
     
  
  
-def reconstruct(coefficients):
+def inverse_fourier_descriptors(coefficients):
     """
     Input:
     - coefficients: list of complex numbers representing the coefficients of the fourier transform, must be a list where the x[0] is the zero frequency term
@@ -70,28 +80,5 @@ def reconstruct(coefficients):
     """
     z = fft.ifft(coefficients*len(coefficients))
     return z
-
-    
- 
-def main():
-    z = ellipse(4,19,300)
-
-    plt.plot(z.real, z.imag)
-    plt.axis('equal')
-    plt.show()
-
-    coeffs, freq = fourier_coeffs(z)
-
-    plt.plot(freq, np.abs(coeffs))
-    plt.title("Fourier Coefficients")
-    plt.xlabel("Frequency")
-    plt.ylabel("Magnitude")
-    plt.show()
-
-    print("the coefficients of the fourier transform are:", coeffs,
-          "\n\n\nThe Frequency channels are:", freq)
-
-
-main()
 
 
