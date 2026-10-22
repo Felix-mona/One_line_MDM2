@@ -51,7 +51,7 @@ plt.show()
 import Plotting as P
 
 
-image = Image("Example_images/smiley.svg", 200); image.sample_paths()
+image = Image("Example_images/koch_snowflake.svg", 300); image.sample_paths()
 pts = image.points
 
 P.plot_spectrum(pts)                         # where is the energy?
