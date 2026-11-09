@@ -1,14 +1,29 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from svgpathtools import svg2paths
-
+import svgwrite
 from pathlib import Path
 
-# Always points to the folder where your script/terminal is operating from
 base_dir = Path.cwd()
+npy_path = base_dir / "outputs" / "bridge" / "bridge_output_polyline.npy"
+svg_path = base_dir / "outputs" / "bridge" / "bridge_output_polyline.svg"
 
-npy_path = base_dir / "outputs" / "Shapes" / "Shapes_output_polyline.npy"
-svg_path = base_dir / "outputs" / "Shapes" / "Shapes_output_polyline.svg"
+# Ensure output directory exists
+svg_path.parent.mkdir(parents=True, exist_ok=True)
+
+# Load numpy array and convert to points list
+npy_coords = np.load(npy_path)
+points = [
+    (float(c.real), float(c.imag)) if isinstance(c, complex) else (float(c[0]), float(c[1]))
+    for c in npy_coords
+]
+
+# Write out the .svg file
+dwg = svgwrite.Drawing(str(svg_path), size=( "2000px", "2000px" ))
+dwg.add(dwg.polyline(points=points, stroke="black", fill="none", stroke_width="1"))
+dwg.save()
+# -----------------------------------------------
+
 
 paths, attributes = svg2paths(svg_path)
 
@@ -18,8 +33,8 @@ complex_coords = []
 for path in paths:
     
 
-    for i in range(1001):
-        t = i / 1000        
+    for i in range(10001):
+        t = i / 10000        
         point = path.point(t)    #  SVG for the exact (X, Y) coordinate at that specific fraction
         complex_coords.append(point)  # Save that coordinate to list
 
@@ -40,7 +55,7 @@ fourier_filtered = fourier_descriptors.copy()
 #n = len(fourier_filtered)
 #keep_count = int(n * keep_low_frequencies)
 
-keep_count = 200
+keep_count = 750
 
 fourier_filtered[keep_count:-keep_count] = 0
 
@@ -57,10 +72,10 @@ smooth_y = [c.imag for c in new_complex_coords]
 
 # Plotting both original and new
 plt.figure(figsize=(10, 10))
-plt.plot(orig_x, orig_y, color='red',  linewidth=4)
+#plt.plot(orig_x, orig_y, color='red',  linewidth=4)
 plt.plot(smooth_x, smooth_y , color='blue', linewidth=2)
 
-plt.gca().invert_yaxis()  # Flip it as keeps being upside down
+#plt.gca().invert_yaxis()  # Flip it as keeps being upside down
 plt.axis('equal') #no stretch
 
 plt.show()
