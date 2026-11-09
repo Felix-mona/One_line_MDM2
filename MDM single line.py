@@ -2,8 +2,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from svgpathtools import svg2paths
 
+from pathlib import Path
 
-paths, attributes = svg2paths(r'C:\Users\finla\Downloads\drawing_oneline.svg')
+# Always points to the folder where your script/terminal is operating from
+base_dir = Path.cwd()
+
+npy_path = base_dir / "outputs" / "Shapes" / "Shapes_output_polyline.npy"
+svg_path = base_dir / "outputs" / "Shapes" / "Shapes_output_polyline.svg"
+
+paths, attributes = svg2paths(svg_path)
 
 
 complex_coords = []
@@ -20,6 +27,8 @@ for path in paths:
 complex_coords = np.array(complex_coords)
 
 
+complex_coords = np.concatenate([complex_coords, complex_coords[::-1]])
+
 fourier_descriptors = np.fft.fft(complex_coords) #converting to fourier
 
 
@@ -31,7 +40,7 @@ fourier_filtered = fourier_descriptors.copy()
 #n = len(fourier_filtered)
 #keep_count = int(n * keep_low_frequencies)
 
-keep_count = 50
+keep_count = 200
 
 fourier_filtered[keep_count:-keep_count] = 0
 
