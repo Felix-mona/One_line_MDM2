@@ -1,5 +1,12 @@
 """
 This contains the functions related to the producing and comparing of the different Loss functions that we will produce
+We could now use different metrics to show for different things:
+ - informative ( Does the sketch match the original? )
+ - Fluid ( Does the curve flow? )
+ - Clean ( Is there junk in the sketch )
+ - Simplicity ( Is it the smallest cutoff K possible )
+ - Artefacts ( How far the line strays outside the original bounding box, Gibb's ringing.)
+
 """
 import numpy as np
 import matplotlib.pyplot as plt
@@ -30,13 +37,13 @@ def Loss(accuracy,smoothness,alpha=1,beta=1):
     loss = alpha*accuracy + beta*smoothness
     return loss
 
-def gather_lowest_metric(image,max_frequency_cutoff,samples,alpha_beta_pairs):
+def gather_lowest_metric(coefficients,max_frequency_cutoff,samples,alpha_beta_pairs):
     """
     INPUT:
-     - image, a list of the coords of the image post fft
-     - max frequency, The highest amount of frequencies that we wish to sample the image with
-     - samples, the amount of different frequencies to sample, geometrically from 0 to max_frequency (Might have something to do with the discretisation number initially!!)
-     - alpha_beta pairs, a list containing coordinate style alpha and beta pairs to test through the different frequencies
+     - coefficients, a list of the fourier coefficients
+     - max frequency - integer, The highest frequency that we wish to sample the image with
+     - samples - integer, the amount of different frequencies cutoffs to sample, linearly from 0 to max_frequency (Might have something to do with the discretisation number initially!!)
+     - alpha_beta pairs - list of tuples, a list containing coordinate style alpha and beta pairs to test through the different frequencies
 
      OUTPUT:
       - [k, alpha, beta] the 3 values for which the loss function scored the lowest
@@ -45,15 +52,17 @@ def gather_lowest_metric(image,max_frequency_cutoff,samples,alpha_beta_pairs):
     combination_per_freq = []
     
     for k in frequencies:
+        k = int(k) #cast to int as the frequencies are floats and we need to use them as integers for the filter function
         min_loss = 10 # make a starting min loss above the highest possible loss
         minimum_combination = []
+        kfiltered = fourier.filter_coeffs(coefficients,k)
 
         for alpha, beta in alpha_beta_pairs:
             #compute metric values and normalise from the metric file
-            temp_ifd = fourier.inverse_fourier_descriptors(fourier.filter_coeffs(image,k))
-            temp_accuracy = calc_metric(temp_ifd,image,'accuracy')
-            temp_smoothness = calc_metric(temp_ifd,image,'smoothness')
-            
+            temp_ifd = fourier.inverse_fourier_descriptors(kfiltered)
+            temp_accuracy = calc_metric(temp_ifd,coefficients,'accuracy')
+            temp_smoothness = calc_metric(temp_ifd,coefficients,'smoothness')
+
             temp_loss = Loss(temp_accuracy,temp_smoothness,alpha=alpha, beta=beta)
             if (temp_loss) < min_loss:
                 min_loss = temp_loss
@@ -101,6 +110,9 @@ def calc_metric(new_image,old_image,mtype=None):
     elif mtype == 'smoothness' or mtype == 'Smoothness':
         """
         smoothness branch
+
+        
+        
         """
         return round(np.random.random(),2)
 
