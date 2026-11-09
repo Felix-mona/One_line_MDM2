@@ -27,6 +27,8 @@ dwg.save()
 
 paths, attributes = svg2paths(svg_path)
 
+number_of_frequencies_kept = 500
+
 
 complex_coords = []
 
@@ -55,9 +57,9 @@ fourier_filtered = fourier_descriptors.copy()
 #n = len(fourier_filtered)
 #keep_count = int(n * keep_low_frequencies)
 
-keep_count = 750
 
-fourier_filtered[keep_count:-keep_count] = 0
+
+fourier_filtered[number_of_frequencies_kept:-number_of_frequencies_kept] = 0
 
 
 new_complex_coords = np.fft.ifft(fourier_filtered) #reverse fourier
