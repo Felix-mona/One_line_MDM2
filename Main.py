@@ -2,6 +2,8 @@ import Metric as met
 from SVG_Manipulation import Image
 import Fourier_reconsctruction as fourier
 import matplotlib.pyplot as plt
+import numpy as np
+
 
 """
 Test
@@ -18,9 +20,9 @@ FREQUENCY_BANDS = 5
 image_1 = Image("Example_images/smiley.svg",N_SAMPLES)
 image_1.sample_paths() #should fill the object with the complex coords
 
-fourier_descriptors,frequencies = fourier.fourier_coeffs(image_1.points)
+coeffs, freqs = fourier.forward_fourier(image_1.points)
 
-lowest_loss_image = met.gather_lowest_metric(image_1.points,N_SAMPLES/2,FREQUENCY_BANDS,ALPHA_BETA)
+lowest_score = met.gather_lowest_metric(coeffs,FREQUENCY_BANDS,N_SAMPLES/2,ALPHA_BETA)
 
 #plotting
 original_x,original_y = [c.real for c in image_1.points],[c.imag for c in image_1.points]
