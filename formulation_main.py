@@ -29,7 +29,7 @@ from route_mapping import (
 # ==========================================================
 
 # 1. File Input / Output
-IMAGE_PATH              = "bridge.png"  # Path to input sketch or drawing
+IMAGE_PATH              = "HedgehogMDM.png"  # Path to input sketch or drawing
 OUTPUT_DIR              = "outputs"                    # Folder where all plots & polylines are saved
 SAVE_POLYLINE           = True                         # Save final continuous polyline (.npy)
 
