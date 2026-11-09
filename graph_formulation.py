@@ -1,419 +1,636 @@
+"""
+Graph Formulation (Sections 2.1.1 - 2.1.4)
+Handles image binarisation, stroke-width rescaling, Lee's skeletonisation,
+Rutovitz crossing numbers, junction-blob clustering, RDP simplification,
+and loop-safe junction merging.
+"""
+
 import numpy as np
 from PIL import Image
+from scipy import ndimage
+from scipy.spatial import cKDTree
 from skimage.morphology import skeletonize
 import networkx as nx
 import matplotlib.pyplot as plt
 
+OFFSETS = [
+    (-1, -1), (-1, 0), (-1, 1),
+    ( 0, -1),          ( 0, 1),
+    ( 1, -1), ( 1, 0), ( 1, 1),
+]
+
 
 # ==========================================================
-# 1. PRE-PROCESSING, MANUAL RESCALING & BINARISATION
+# 1. PRE-PROCESSING, RESCALING & BINARISATION (2.1.1)
 # ==========================================================
 
 def load_and_scale_image(
     image_path,
-    input_stroke_width=4.0,
+    input_stroke_width=8.0,
     target_stroke_width=4.0,
-    threshold=128
+    threshold=128,
 ):
     """
-    Loads any 1, 2, 3, or 4-channel image, binarises it, and rescales the canvas
-    based on the manual input_stroke_width relative to target_stroke_width.
+    Loads an image, flattens alpha onto white, binarises, crops tightly to
+    foreground content, and downscales if input_stroke_width > target_stroke_width
+    for clean medial-axis thinning.
     """
-    img = Image.open(image_path)
-    
-    # Handle alpha channel (LA or RGBA)
-    if img.mode in ("RGBA", "LA"):
-        alpha = np.array(img.split()[-1])
-        arr = np.array(img.convert("L"))
-        arr[alpha < 128] = 255  # Treat transparent pixels as white background
-        gray_img = Image.fromarray(arr)
+    with Image.open(image_path) as img:
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            rgba = img.convert("RGBA")
+            white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+            gray_img = Image.alpha_composite(white, rgba).convert("L")
+        else:
+            gray_img = img.convert("L")
+
+        arr = np.array(gray_img, dtype=np.uint8)
+
+    binary = arr < threshold
+    if np.sum(binary) > binary.size / 2:
+        binary = ~binary
+
+    active = np.argwhere(binary)
+    if len(active) == 0:
+        padded = np.pad(binary, pad_width=1, mode="constant", constant_values=False)
+        return padded, 1.0, float(np.hypot(*padded.shape))
+
+    r_min, c_min = active.min(axis=0)
+    r_max, c_max = active.max(axis=0) + 1
+    cropped = binary[r_min:r_max, c_min:c_max]
+
+    h_orig, w_orig = cropped.shape
+    orig_diag = float(np.hypot(h_orig, w_orig))
+
+    # Downsample thick strokes so skeletonisation produces clean 1px centerlines
+    downsample = max(1.0, float(input_stroke_width) / max(1.0, float(target_stroke_width)))
+    if downsample > 1.05:
+        h_work = max(3, int(round(h_orig / downsample)))
+        w_work = max(3, int(round(w_orig / downsample)))
+        pil_mask = Image.fromarray((cropped.astype(np.uint8)) * 255, mode="L")
+        resized = pil_mask.resize((w_work, h_work), resample=Image.Resampling.BILINEAR)
+        work_mask = np.array(resized, dtype=np.uint8) >= 96
+        scale_factor = orig_diag / float(np.hypot(h_work, w_work))
     else:
-        gray_img = img.convert("L")
+        work_mask = cropped
+        scale_factor = 1.0
 
-    scale_factor = 1.0
+    # Pad by 1px so boundary foreground pixels have a complete 8-neighbourhood
+    padded_mask = np.pad(work_mask, pad_width=1, mode="constant", constant_values=False)
+    return padded_mask, scale_factor, orig_diag
 
-    # Binarise rescaled image (True = stroke, False = background)
-    final_arr = np.array(gray_img)
-    final_binary = final_arr < threshold
-    if np.sum(final_binary) > final_binary.size / 2:
-        final_binary = ~final_binary
-
-    return final_binary.astype(bool), scale_factor
-
-
-# ==========================================================
-# 2. SKELETONISATION & CONTENT CROPPING (2.1.1)
-# ==========================================================
 
 def run_lee_skeletonisation(binary_mask):
-    """
-    Lee's medial-axis thinning algorithm preserving Euler characteristic.
-    """
-    return skeletonize(binary_mask, method="lee").astype(np.uint8)
-
-
-def crop_to_skeleton_content(skeleton, padding=2):
-    """
-    Crops the skeleton tightly around the active skeleton pixels.
-    Returns cropped skeleton, diagonal length D of the content box, and bounding coordinates.
-    """
-    fg_r, fg_c = np.where(skeleton > 0)
-    
-    if len(fg_r) == 0:
-        h, w = skeleton.shape
-        return skeleton, float(np.hypot(h, w)), (0, h, 0, w)
-
-    min_r, max_r = int(np.min(fg_r)), int(np.max(fg_r))
-    min_c, max_c = int(np.min(fg_c)), int(np.max(fg_c))
-
-    content_h = max(1, max_r - min_r)
-    content_w = max(1, max_c - min_c)
-    canvas_diag = float(np.hypot(content_h, content_w))
-
-    rows, cols = skeleton.shape
-    pad_min_r = max(0, min_r - padding)
-    pad_max_r = min(rows, max_r + padding + 1)
-    pad_min_c = max(0, min_c - padding)
-    pad_max_c = min(cols, max_c + padding + 1)
-
-    cropped_skeleton = skeleton[pad_min_r:pad_max_r, pad_min_c:pad_max_c].copy()
-
-    return cropped_skeleton, canvas_diag, (min_r, max_r, min_c, max_c)
+    """Lee's medial-axis thinning normalized to {0, 1} uint8."""
+    return (skeletonize(binary_mask, method="lee") > 0).astype(np.uint8)
 
 
 # ==========================================================
-# 3. RUTOVITZ CROSSING NUMBER (2.1.2)
+# 2. RUTOVITZ CROSSING NUMBERS & CANONICAL NODES (2.1.2)
 # ==========================================================
 
 def compute_rutovitz_crossing_number(skeleton):
     """
-    Computes Rutovitz crossing numbers across 8-connected neighbours:
+    Vectorised Rutovitz crossing number across the 8-neighbourhood:
         X(p) = 0.5 * sum(|p_{i+1} - p_i|)
-    Endpoints: X(p) == 1
-    Junctions: X(p) >= 3
+    Endpoints: CN == 1 | Line pixels: CN == 2 | Junctions: CN >= 3
     """
-    rows, cols = skeleton.shape
-    crossing_map = np.zeros((rows, cols), dtype=np.uint8)
-    
-    fg_r, fg_c = np.where(skeleton > 0)
-    nbr_offsets = [
-        (-1, 0), (-1, 1), (0, 1), (1, 1),
-        (1, 0), (1, -1), (0, -1), (-1, -1)
+    skel_bin = (skeleton > 0).astype(np.int8)
+    padded = np.pad(skel_bin, pad_width=1, mode="constant", constant_values=0)
+
+    p_ring = [
+        padded[:-2, 1:-1],  # N
+        padded[:-2, 2:],    # NE
+        padded[1:-1, 2:],   # E
+        padded[2:, 2:],     # SE
+        padded[2:, 1:-1],   # S
+        padded[2:, :-2],    # SW
+        padded[1:-1, :-2],  # W
+        padded[:-2, :-2],   # NW
     ]
 
-    for r, c in zip(fg_r, fg_c):
-        if r == 0 or r == rows - 1 or c == 0 or c == cols - 1:
-            continue
-            
-        seq = [skeleton[r + dr, c + dc] for dr, dc in nbr_offsets]
-        transitions = sum(seq[i] != seq[(i + 1) % 8] for i in range(8))
-        crossing_map[r, c] = transitions // 2
+    transitions = sum(np.abs(p_ring[(i + 1) % 8] - p_ring[i]) for i in range(8))
+    return ((transitions // 2) * skel_bin).astype(np.uint8)
 
-    endpoints = list(zip(*np.where((crossing_map == 1) & (skeleton > 0))))
-    junctions = list(zip(*np.where((crossing_map >= 3) & (skeleton > 0))))
 
-    return crossing_map, endpoints, junctions
+def extract_canonical_nodes(skeleton, crossing_number, merge_dist_work):
+    """
+    Collapses contiguous junction blobs (CN >= 3) into single medoid nodes,
+    registers endpoints (CN == 1), and merges nodes within merge_dist_work.
+    """
+    H, W = skeleton.shape
+    node_grid = np.full((H, W), fill_value=-1, dtype=np.int32)
+    raw_nodes, raw_types, raw_members = {}, {}, {}
+    nid = 0
+
+    # 1. Endpoints (CN == 1)
+    for r, c in np.argwhere((skeleton > 0) & (crossing_number == 1)):
+        raw_nodes[nid] = (float(r), float(c))
+        raw_types[nid] = "endpoint"
+        raw_members[nid] = [(int(r), int(c))]
+        nid += 1
+
+    # 2. Contiguous junction blobs (CN >= 3)
+    junc_mask = (skeleton > 0) & (crossing_number >= 3)
+    labeled, num_blobs = ndimage.label(junc_mask, structure=np.ones((3, 3), dtype=bool))
+    for blob_idx in range(1, num_blobs + 1):
+        pts = np.argwhere(labeled == blob_idx)
+        centroid = pts.mean(axis=0)
+        best = pts[np.argmin(np.sum((pts - centroid) ** 2, axis=1))]
+        raw_nodes[nid] = (float(best[0]), float(best[1]))
+        raw_types[nid] = "junction"
+        raw_members[nid] = [(int(r), int(c)) for r, c in pts]
+        nid += 1
+
+    # 3. Merge nearby nodes via KD-Tree and bridge intermediate skeleton pixels
+    final_nodes, final_types, final_members = {}, {}, {}
+    skel_set = set(map(tuple, np.argwhere(skeleton > 0)))
+
+    if len(raw_nodes) > 0 and merge_dist_work > 0.0:
+        raw_ids = list(raw_nodes.keys())
+        coords = np.array([raw_nodes[i] for i in raw_ids])
+        pairs = cKDTree(coords).query_pairs(r=merge_dist_work)
+
+        mg = nx.Graph()
+        mg.add_nodes_from(raw_ids)
+        mg.add_edges_from((raw_ids[i], raw_ids[j]) for i, j in pairs)
+
+        for new_id, cluster in enumerate(nx.connected_components(mg)):
+            cluster_list = list(cluster)
+            combined = {px for i in cluster_list for px in raw_members[i]}
+            is_junc = any(raw_types[i] == "junction" for i in cluster_list)
+
+            if len(cluster_list) > 1:
+                rep_px = raw_members[cluster_list[0]][0]
+                max_steps = int(np.ceil(merge_dist_work)) + 4
+                for other_id in cluster_list[1:]:
+                    target_px = raw_members[other_id][0]
+                    q = [(rep_px, 0)]
+                    parent = {rep_px: None}
+                    while q:
+                        curr, d = q.pop(0)
+                        if curr == target_px:
+                            p = curr
+                            while p is not None:
+                                combined.add(p)
+                                p = parent[p]
+                            break
+                        if d < max_steps:
+                            for dr, dc in OFFSETS:
+                                nbr = (curr[0] + dr, curr[1] + dc)
+                                if nbr in skel_set and nbr not in parent:
+                                    parent[nbr] = curr
+                                    q.append((nbr, d + 1))
+
+            pix_arr = np.array(list(combined))
+            centroid = pix_arr.mean(axis=0)
+            best_px = pix_arr[np.argmin(np.sum((pix_arr - centroid) ** 2, axis=1))]
+
+            final_nodes[new_id] = (int(best_px[0]), int(best_px[1]))
+            final_types[new_id] = "junction" if is_junc else "endpoint"
+            final_members[new_id] = list(combined)
+            for r, c in combined:
+                node_grid[r, c] = new_id
+    else:
+        for i, (r, c) in raw_nodes.items():
+            final_nodes[i] = (int(r), int(c))
+            final_types[i] = raw_types[i]
+            final_members[i] = raw_members[i]
+            for pr, pc in raw_members[i]:
+                node_grid[pr, pc] = i
+
+    return final_nodes, final_types, node_grid, final_members
 
 
 # ==========================================================
-# 4. EDGE TRACING & RDP SIMPLIFICATION (2.1.3)
+# 3. LOSSLESS SKELETON TRACING & RDP DECIMATION (2.1.3)
 # ==========================================================
 
-def trace_skeleton_branches(skeleton, endpoints, junctions):
+def _bfs_cluster_path(start, end, valid_pixels):
+    """Shortest 8-connected walk inside a node cluster."""
+    if start == end:
+        return [start]
+    queue = [start]
+    parent = {start: None}
+    while queue:
+        curr = queue.pop(0)
+        if curr == end:
+            path = []
+            while curr is not None:
+                path.append(curr)
+                curr = parent[curr]
+            return path[::-1]
+        for dr, dc in OFFSETS:
+            nbr = (curr[0] + dr, curr[1] + dc)
+            if nbr in valid_pixels and nbr not in parent:
+                parent[nbr] = curr
+                queue.append(nbr)
+    return [start, end]
+
+
+def _rc_to_xy(rc_list, scale_factor):
+    """Converts (row, col) pixel list to deduplicated Cartesian (x, y) float array."""
+    clean = [rc_list[0]]
+    for pt in rc_list[1:]:
+        if pt[0] != clean[-1][0] or pt[1] != clean[-1][1]:
+            clean.append(pt)
+    arr = np.array(clean, dtype=float)
+    # x = col * scale, y = -row * scale (so plots render right-side-up)
+    return np.column_stack((arr[:, 1] * scale_factor, -arr[:, 0] * scale_factor))
+
+
+def trace_skeleton_to_graph(skeleton, nodes, node_types, node_grid, node_members, scale_factor):
     """
-    Traces pixel chains radiating from endpoints/junctions, and handles
-    isolated closed loops lacking junction nodes.
+    Traces 8-connected pixel chains between canonical nodes and captures
+    isolated closed loops (e.g. circles/polygons without junctions).
     """
-    rows, cols = skeleton.shape
-    visited_edges = set()
-    node_set = set(endpoints) | set(junctions)
-    edges = []
+    G = nx.MultiGraph()
+    for nid, (r, c) in nodes.items():
+        G.add_node(
+            nid,
+            pos=np.array([c * scale_factor, -r * scale_factor], dtype=float),
+            kind=node_types.get(nid, "endpoint"),
+        )
 
-    nbrs = [(-1, 0), (1, 0), (0, -1), (0, 1),
-            (-1, -1), (-1, 1), (1, -1), (1, 1)]
+    H, W = skeleton.shape
+    visited = np.zeros_like(skeleton, dtype=bool)
+    direct_seen = set()
 
-    def get_valid_nbrs(pt):
-        r, c = pt
-        for dr, dc in nbrs:
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < rows and 0 <= nc < cols and skeleton[nr, nc]:
-                yield (nr, nc)
+    # Pass 1: Trace paths radiating from canonical nodes
+    for u_id, u_pos in list(nodes.items()):
+        u_pixels = node_members.get(u_id, [u_pos])
+        u_set = set(u_pixels)
 
-    # 1. Trace branches connected to junctions or endpoints
-    for start_node in node_set:
-        for first_step in get_valid_nbrs(start_node):
-            step_fwd = (start_node, first_step)
-            step_rev = (first_step, start_node)
-            if step_fwd in visited_edges or step_rev in visited_edges:
-                continue
+        for p in u_pixels:
+            for dr, dc in OFFSETS:
+                nr, nc = p[0] + dr, p[1] + dc
+                if not (0 <= nr < H and 0 <= nc < W) or not skeleton[nr, nc]:
+                    continue
 
-            path = [start_node, first_step]
-            visited_edges.add(step_fwd)
-            visited_edges.add(step_rev)
+                nbr_id = int(node_grid[nr, nc])
 
-            prev_pt, curr_pt = start_node, first_step
-            while curr_pt not in node_set:
-                candidates = [n for n in get_valid_nbrs(curr_pt) if n != prev_pt]
-                if not candidates:
-                    break
-                next_pt = candidates[0]
-                visited_edges.add((curr_pt, next_pt))
-                visited_edges.add((next_pt, curr_pt))
-                path.append(next_pt)
-                prev_pt, curr_pt = curr_pt, next_pt
+                # Case A: Unvisited interior stroke pixel
+                if nbr_id == -1 and not visited[nr, nc]:
+                    path = list(_bfs_cluster_path(u_pos, p, u_set))
+                    curr_r, curr_c = nr, nc
+                    target_id, target_px = -1, None
+                    steps = 0
+                    left_start = False
 
-            if len(path) > 1:
-                edges.append(path)
+                    while True:
+                        path.append((curr_r, curr_c))
+                        visited[curr_r, curr_c] = True
+                        steps += 1
 
-    # 2. Trace isolated closed loops
-    unvisited_fg = set(zip(*np.where(skeleton > 0))) - node_set
-    for pt in list(unvisited_fg):
-        if any((pt, n) in visited_edges or (n, pt) in visited_edges for n in get_valid_nbrs(pt)):
+                        path_nbrs, other_nodes, self_nodes = [], [], []
+                        for s_dr, s_dc in OFFSETS:
+                            sr, sc = curr_r + s_dr, curr_c + s_dc
+                            if 0 <= sr < H and 0 <= sc < W and skeleton[sr, sc]:
+                                s_id = int(node_grid[sr, sc])
+                                if s_id == -1 and not visited[sr, sc]:
+                                    path_nbrs.append((sr, sc))
+                                elif s_id != -1:
+                                    if s_id != u_id:
+                                        other_nodes.append(((sr, sc), s_id))
+                                    else:
+                                        self_nodes.append(((sr, sc), u_id))
+
+                        if not self_nodes:
+                            left_start = True
+
+                        if other_nodes:
+                            target_px, target_id = other_nodes[0]
+                            break
+                        elif self_nodes and left_start:
+                            target_px, target_id = self_nodes[0]
+                            break
+                        elif path_nbrs:
+                            # Prefer 4-connected orthogonal steps before diagonals
+                            path_nbrs.sort(key=lambda pt: abs(pt[0] - curr_r) + abs(pt[1] - curr_c))
+                            curr_r, curr_c = path_nbrs[0]
+                        elif self_nodes and steps >= 3:
+                            target_px, target_id = self_nodes[0]
+                            break
+                        else:
+                            break
+
+                    if target_id != -1 and target_px is not None:
+                        v_pos = nodes[target_id]
+                        v_set = set(node_members.get(target_id, [v_pos]))
+                        path.extend(_bfs_cluster_path(target_px, v_pos, v_set))
+                        pts_xy = _rc_to_xy(path, scale_factor)
+                        if len(pts_xy) >= 2:
+                            G.add_edge(u_id, target_id, pts=pts_xy)
+
+                # Case B: Directly touching node clusters
+                elif nbr_id != -1 and nbr_id != u_id:
+                    edge_key = (min(u_id, nbr_id), max(u_id, nbr_id))
+                    if edge_key not in direct_seen:
+                        direct_seen.add(edge_key)
+                        v_pos = nodes[nbr_id]
+                        v_set = set(node_members.get(nbr_id, [v_pos]))
+                        full_rc = _bfs_cluster_path(u_pos, p, u_set) + _bfs_cluster_path((nr, nc), v_pos, v_set)
+                        pts_xy = _rc_to_xy(full_rc, scale_factor)
+                        if len(pts_xy) >= 2:
+                            G.add_edge(u_id, nbr_id, pts=pts_xy)
+
+    # Pass 2: Trace isolated closed loops lacking junctions (e.g. circles)
+    unvisited_loops = np.argwhere((skeleton > 0) & (~visited) & (node_grid == -1))
+    for sr, sc in unvisited_loops:
+        if visited[sr, sc]:
             continue
+        loop_id = max(G.nodes, default=-1) + 1
+        start_rc = (int(sr), int(sc))
+        path = [start_rc]
+        curr_r, curr_c = start_rc
+        visited[curr_r, curr_c] = True
 
-        loop_path = [pt]
-        curr_pt, prev_pt = pt, None
         while True:
-            candidates = [n for n in get_valid_nbrs(curr_pt) if n != prev_pt]
-            if not candidates:
+            nbrs = [
+                (curr_r + dr, curr_c + dc)
+                for dr, dc in OFFSETS
+                if 0 <= curr_r + dr < H and 0 <= curr_c + dc < W
+                and skeleton[curr_r + dr, curr_c + dc]
+                and node_grid[curr_r + dr, curr_c + dc] == -1
+                and not visited[curr_r + dr, curr_c + dc]
+            ]
+            if nbrs:
+                nbrs.sort(key=lambda pt: abs(pt[0] - curr_r) + abs(pt[1] - curr_c))
+                curr_r, curr_c = nbrs[0]
+                path.append((curr_r, curr_c))
+                visited[curr_r, curr_c] = True
+            else:
                 break
-            next_pt = candidates[0]
-            visited_edges.add((curr_pt, next_pt))
-            visited_edges.add((next_pt, curr_pt))
-            if next_pt == pt:
-                loop_path.append(next_pt)
-                break
-            if next_pt in loop_path:
-                break
-            loop_path.append(next_pt)
-            prev_pt, curr_pt = curr_pt, next_pt
 
-        if len(loop_path) > 2:
-            edges.append(loop_path)
+        if len(path) > 2:
+            path.append(start_rc)
+            pts_xy = _rc_to_xy(path, scale_factor)
+            if len(pts_xy) >= 3:
+                G.add_node(loop_id, pos=pts_xy[0].copy(), kind="loop_anchor")
+                G.add_edge(loop_id, loop_id, pts=pts_xy)
 
-    return edges
+    return G
 
 
 def rdp_simplify(points, epsilon):
-    """
-    Ramer-Douglas-Peucker (RDP) polyline decimation.
-    Uses 2D cross-product arithmetic compatible with NumPy 2.0+.
-    """
+    """Ramer-Douglas-Peucker (RDP) polyline decimation."""
     pts = np.asarray(points, dtype=float)
-    if len(pts) <= 2:
+    if len(pts) <= 2 or epsilon <= 0.0:
         return pts
 
     start, end = pts[0], pts[-1]
     line_vec = end - start
-    line_len = np.hypot(line_vec[0], line_vec[1])
+    line_len = float(np.hypot(line_vec[0], line_vec[1]))
 
-    diff = pts - start
+    diff = pts[1:-1] - start
     if line_len < 1e-12:
         dists = np.hypot(diff[:, 0], diff[:, 1])
     else:
-        perp_dist = np.abs(line_vec[0] * diff[:, 1] - line_vec[1] * diff[:, 0])
-        dists = perp_dist / line_len
+        dists = np.abs(line_vec[0] * diff[:, 1] - line_vec[1] * diff[:, 0]) / line_len
 
-    max_idx = np.argmax(dists)
-    max_dist = dists[max_idx]
-
-    if max_dist > epsilon:
+    max_idx = int(np.argmax(dists)) + 1
+    if dists[max_idx - 1] > epsilon:
         left = rdp_simplify(pts[:max_idx + 1], epsilon)
         right = rdp_simplify(pts[max_idx:], epsilon)
         return np.vstack((left[:-1], right))
-    else:
-        return np.array([start, end])
+    return np.array([start, end], dtype=float)
 
 
-# ==========================================================
-# 5. CLOSE-NODE MERGING TO CENTROIDS (2.1.4)
-# ==========================================================
-
-def merge_nearby_junctions(G, d_euclid, d_edge_factor=3.0):
+def apply_rdp_to_graph(G, epsilon):
     """
-    Collapses clusters of nearby junction nodes into their spatial centroid.
-    Nodes are clustered if:
-      - Direct Euclidean distance <= d_euclid, OR
-      - Connected by an edge with path length <= d_euclid * d_edge_factor
+    Applies RDP to every edge in G. Splits self-loops (u == v) in half
+    before simplifying so closed shapes never collapse into a 2-point line.
     """
-    d_edge_thresh = d_euclid * d_edge_factor
-    nodes = list(G.nodes())
-    if not nodes:
-        return G
-    
-    merge_graph = nx.Graph()
-    merge_graph.add_nodes_from(nodes)
-
-    for i, u in enumerate(nodes):
-        pos_u = G.nodes[u]["pos"]
-        
-        # Euclidean proximity
-        for v in nodes[i + 1:]:
-            pos_v = G.nodes[v]["pos"]
-            if np.hypot(pos_u[0] - pos_v[0], pos_u[1] - pos_v[1]) <= d_euclid:
-                merge_graph.add_edge(u, v)
-
-        # Short connecting edge path length
-        for nbr in G.neighbors(u):
-            if nbr > u:
-                edge_dict = G.get_edge_data(u, nbr)
-                min_len = min(
-                    np.sum(np.hypot(np.diff(d["pts"][:, 0]), np.diff(d["pts"][:, 1])))
-                    for d in edge_dict.values()
-                )
-                if min_len <= d_edge_thresh:
-                    merge_graph.add_edge(u, nbr)
-
-    clusters = list(nx.connected_components(merge_graph))
-    node_to_rep = {}
-    cluster_centroids = {}
-
-    for cluster in clusters:
-        cluster_list = list(cluster)
-        rep = cluster_list[0]
-        centroid = np.mean([G.nodes[n]["pos"] for n in cluster_list], axis=0)
-        cluster_centroids[rep] = centroid
-        for n in cluster_list:
-            node_to_rep[n] = rep
-
-    merged_G = nx.MultiGraph()
-    for rep, centroid in cluster_centroids.items():
-        merged_G.add_node(rep, pos=centroid)
-
-    for u, v, k, data in G.edges(keys=True, data=True):
-        new_u = node_to_rep[u]
-        new_v = node_to_rep[v]
-
-        if new_u == new_v:
-            continue
-
-        pts = data["pts"].copy()
-        pts[0] = merged_G.nodes[new_u]["pos"]
-        pts[-1] = merged_G.nodes[new_v]["pos"]
-
-        edge_len = np.sum(np.hypot(np.diff(pts[:, 0]), np.diff(pts[:, 1])))
-        if edge_len > 1e-4:
-            attrs = dict(data)
-            attrs["pts"] = pts
-            merged_G.add_edge(new_u, new_v, **attrs)
-
-    return merged_G
+    H = G.copy()
+    for u, v, k, data in H.edges(keys=True, data=True):
+        pts = data["pts"]
+        if u == v and len(pts) > 4:
+            mid = len(pts) // 2
+            left = rdp_simplify(pts[:mid + 1], epsilon)
+            right = rdp_simplify(pts[mid:], epsilon)
+            data["pts"] = np.vstack((left[:-1], right))
+        else:
+            data["pts"] = rdp_simplify(pts, epsilon)
+    return H
 
 
 # ==========================================================
-# 6. COMPLETE GRAPH FORMULATION PIPELINE
+# 4. LOOP-SAFE JUNCTION MERGING & CLEANING (2.1.4)
 # ==========================================================
+
+def polyline_length(pts):
+    if len(pts) < 2:
+        return 0.0
+    diffs = np.diff(pts, axis=0)
+    return float(np.sum(np.hypot(diffs[:, 0], diffs[:, 1])))
+
+
+def dissolve_degree_two_nodes(G):
+    """Merges non-loop degree-2 continuation nodes along smooth strokes."""
+    H = G.copy()
+    changed = True
+    while changed:
+        changed = False
+        for node in list(H.nodes()):
+            if H.degree(node) != 2:
+                continue
+            edges = list(H.edges(node, keys=True, data=True))
+            if len(edges) != 2 or any(u == v for u, v, _, _ in edges):
+                continue
+
+            (u1, v1, k1, d1), (u2, v2, k2, d2) = edges
+            nbr1 = v1 if u1 == node else u1
+            nbr2 = v2 if u2 == node else u2
+            node_pos = H.nodes[node]["pos"]
+
+            pts1 = d1["pts"]
+            if np.linalg.norm(pts1[-1] - node_pos) > np.linalg.norm(pts1[0] - node_pos):
+                pts1 = pts1[::-1]
+            pts2 = d2["pts"]
+            if np.linalg.norm(pts2[0] - node_pos) > np.linalg.norm(pts2[-1] - node_pos):
+                pts2 = pts2[::-1]
+
+            merged_pts = np.vstack((pts1[:-1], pts2))
+            H.remove_edge(u1, v1, key=k1)
+            H.remove_edge(u2, v2, key=k2)
+            H.remove_node(node)
+            H.add_edge(nbr1, nbr2, pts=merged_pts)
+            changed = True
+            break
+    return H
+
+
+def merge_nearby_junctions(G, d_edge_thresh):
+    """
+    Loop-safe junction contraction: collapses short edges (< d_edge_thresh)
+    between junctions into their centroid while strictly preserving all closed
+    self-loops (u == v) and parallel loop petals.
+    """
+    H = dissolve_degree_two_nodes(G)
+
+    while True:
+        short_g = nx.Graph()
+        for u, v, k, data in H.edges(keys=True, data=True):
+            if u != v and H.degree(u) >= 3 and H.degree(v) >= 3:
+                if polyline_length(data["pts"]) <= d_edge_thresh:
+                    short_g.add_edge(u, v)
+
+        clusters = [list(c) for c in nx.connected_components(short_g) if len(c) > 1]
+        if not clusters:
+            break
+
+        for cluster in clusters:
+            c_set = set(cluster)
+            centroid = np.mean([H.nodes[n]["pos"] for n in cluster], axis=0)
+            rep = cluster[0]
+            old_pos = {n: H.nodes[n]["pos"].copy() for n in cluster}
+            H.nodes[rep]["pos"] = centroid
+            H.nodes[rep]["kind"] = "junction"
+
+            seen = set()
+            internal, external = [], []
+            for u, v, k, data in list(H.edges(cluster, keys=True, data=True)):
+                eid = (min(u, v), max(u, v), k) if u != v else (u, v, k)
+                if eid in seen:
+                    continue
+                seen.add(eid)
+                if u in c_set and v in c_set:
+                    internal.append((u, v, k, data["pts"].copy()))
+                else:
+                    external.append((u, v, k, data["pts"].copy()))
+
+            for u, v, k, _ in internal + external:
+                if H.has_edge(u, v, key=k):
+                    H.remove_edge(u, v, key=k)
+
+            # Keep self-loops and parallel petals longer than d_edge_thresh
+            pair_groups = {}
+            for u, v, k, pts in internal:
+                if u == v:
+                    pts[0], pts[-1] = centroid, centroid
+                    H.add_edge(rep, rep, pts=pts)
+                else:
+                    pk = (min(u, v), max(u, v))
+                    pair_groups.setdefault(pk, []).append((pts, polyline_length(pts)))
+
+            for pk, edge_list in pair_groups.items():
+                edge_list.sort(key=lambda x: x[1])
+                for pts, _ in edge_list[1:]:
+                    pts[0], pts[-1] = centroid, centroid
+                    H.add_edge(rep, rep, pts=pts)
+
+            # Re-anchor external edges to the new centroid on the correct end
+            for u, v, k, pts in external:
+                inner = u if u in c_set else v
+                outer = v if u in c_set else u
+                in_p, out_p = old_pos[inner], H.nodes[outer]["pos"]
+                d_fwd = np.linalg.norm(pts[0] - in_p) + np.linalg.norm(pts[-1] - out_p)
+                d_rev = np.linalg.norm(pts[-1] - in_p) + np.linalg.norm(pts[0] - out_p)
+                if d_fwd <= d_rev:
+                    pts[0] = centroid
+                else:
+                    pts[-1] = centroid
+                H.add_edge(rep, outer, pts=pts)
+
+            for n in cluster[1:]:
+                if n in H:
+                    H.remove_node(n)
+
+        H = dissolve_degree_two_nodes(H)
+
+    # Remove any isolated 0-degree nodes
+    H.remove_nodes_from([n for n in list(H.nodes()) if H.degree(n) == 0])
+    return H
+
+
+def prune_whiskers_and_noise(G, whisker_thresh, min_comp_len):
+    """Prunes tiny degree-1 terminal whiskers and tiny isolated noise specks."""
+    H = G.copy()
+
+    # 1. Prune short degree-1 whiskers
+    changed = True
+    while changed:
+        changed = False
+        for u, v, k, data in list(H.edges(keys=True, data=True)):
+            if u != v and (H.degree(u) == 1 or H.degree(v) == 1):
+                if polyline_length(data["pts"]) < whisker_thresh:
+                    H.remove_edge(u, v, key=k)
+                    for n in (u, v):
+                        if n in H and H.degree(n) == 0:
+                            H.remove_node(n)
+                    H = dissolve_degree_two_nodes(H)
+                    changed = True
+                    break
+
+    # 2. Prune tiny disconnected noise components
+    for comp in list(nx.connected_components(H)):
+        comp_len = sum(polyline_length(d["pts"]) for _, _, _, d in H.edges(comp, keys=True, data=True))
+        if comp_len < min_comp_len:
+            H.remove_nodes_from(comp)
+
+    return dissolve_degree_two_nodes(H)
+
+
+# ==========================================================
+# 5. COMPLETE GRAPH FORMULATION PIPELINE & SAVING
+# ==========================================================
+
+def save_skeleton_image(skeleton, save_path):
+    """Saves the binary skeleton as a black-on-white PNG image."""
+    img_u8 = np.where(skeleton > 0, 0, 255).astype(np.uint8)
+    Image.fromarray(img_u8, mode="L").save(save_path)
+    print(f"Saved skeleton image to '{save_path}'")
+
 
 def build_graph_from_image(
     image_path,
-    input_stroke_width=10.0,  # Manual setting: estimated stroke width of input in pixels
-    target_stroke_width=4.0,  # Normalized target width for skeletonisation
+    input_stroke_width=8.0,
+    target_stroke_width=4.0,
     binarise_thresh=128,
-    d_euclid_prop=0.015,      # 1.5% of content diagonal
-    d_edge_factor=3.0,        # 3.0 * d_euclid
-    rdp_epsilon_prop=0.003    # 0.3% of content diagonal
+    d_euclid_prop=0.008,
+    d_edge_factor=2.5,
+    rdp_epsilon_prop=0.002,
+    whisker_prop=0.010,
+    min_comp_prop=0.015,
+    skeleton_save_path=None,
 ):
     """
-    Executes Sections 2.1.1 to 2.1.4:
-    1. Manually rescales image by (target_stroke_width / input_stroke_width).
-    2. Runs Lee's medial-axis thinning.
-    3. Crops canvas to active skeleton pixels.
-    4. Detects junctions and endpoints via Rutovitz crossing numbers.
-    5. Simplifies branches via RDP using rdp_epsilon_prop * D.
-    6. Collapses nearby nodes to their centroids using d_euclid_prop * D.
+    Full Section 2.1 pipeline:
+    1. Loads, binarises, crops, and rescales image by stroke width.
+    2. Runs Lee's skeletonisation.
+    3. Extracts canonical endpoints & junction blobs via Rutovitz crossing numbers.
+    4. Traces all branches and closed loops into a MultiGraph.
+    5. Simplifies polylines with loop-safe RDP and merges close junctions.
     """
-    # Step 1: Manual scaling & binarisation
-    binary, scale_factor = load_and_scale_image(
-        image_path,
+    binary_mask, scale_factor, canvas_diag = load_and_scale_image(
+        image_path=image_path,
         input_stroke_width=input_stroke_width,
         target_stroke_width=target_stroke_width,
-        threshold=binarise_thresh
+        threshold=binarise_thresh,
     )
 
-    # Step 2: Skeletonisation (2.1.1)
-    full_skeleton = run_lee_skeletonisation(binary)
+    skeleton = run_lee_skeletonisation(binary_mask)
+    if skeleton_save_path:
+        save_skeleton_image(skeleton, skeleton_save_path)
 
-    # Step 3: Crop to Content Bounding Box
-    skeleton, canvas_diag, (r0, r1, c0, c1) = crop_to_skeleton_content(full_skeleton, padding=2)
-    
     d_euclid = d_euclid_prop * canvas_diag
-    rdp_epsilon = rdp_epsilon_prop * canvas_diag
+    d_edge_thresh = d_euclid * d_edge_factor
+    rdp_epsilon = max(1.0, rdp_epsilon_prop * canvas_diag)
+    whisker_thresh = whisker_prop * canvas_diag
+    min_comp_len = min_comp_prop * canvas_diag
 
-    print(f"Input stroke: {input_stroke_width:.1f}px -> scaled {scale_factor:.2f}x (target: {target_stroke_width:.1f}px)")
-    print(f"Content Bounding Box: [{c1 - c0}w x {r1 - r0}h] | Diagonal D = {canvas_diag:.1f}px")
-    print(f"Merge d_euclid: {d_euclid:.2f}px ({d_euclid_prop*100:.2f}% of D)")
-    print(f"RDP epsilon:    {rdp_epsilon:.2f}px ({rdp_epsilon_prop*100:.2f}% of D)")
+    print(f"Canvas Diagonal D = {canvas_diag:.1f}px | Scale factor = {scale_factor:.2f}x")
+    print(f"Node merge d_euclid = {d_euclid:.2f}px | Junction edge merge = {d_edge_thresh:.2f}px | RDP eps = {rdp_epsilon:.2f}px")
 
-    # Step 4: Rutovitz Crossing Numbers (2.1.2)
-    crossing_map, endpoints, junctions = compute_rutovitz_crossing_number(skeleton)
+    cn = compute_rutovitz_crossing_number(skeleton)
+    nodes, node_types, node_grid, node_members = extract_canonical_nodes(
+        skeleton, cn, merge_dist_work=d_euclid / scale_factor
+    )
 
-    # Step 5: Tracing & RDP Simplification (2.1.3)
-    raw_edges = trace_skeleton_branches(skeleton, endpoints, junctions)
-
-    initial_G = nx.MultiGraph()
-    coord_to_node = {}
-
-    def get_or_create_node(coord_xy):
-        key = (round(coord_xy[0], 2), round(coord_xy[1], 2))
-        if key not in coord_to_node:
-            node_id = len(coord_to_node)
-            coord_to_node[key] = node_id
-            initial_G.add_node(node_id, pos=np.array(coord_xy, dtype=float))
-        return coord_to_node[key]
-
-    for raw_edge in raw_edges:
-        coords_xy = np.array([[c, -r] for r, c in raw_edge], dtype=float)
-        simplified_pts = rdp_simplify(coords_xy, epsilon=rdp_epsilon)
-        u = get_or_create_node(simplified_pts[0])
-        v = get_or_create_node(simplified_pts[-1])
-        initial_G.add_edge(u, v, pts=simplified_pts)
-
-    # Step 6: Close-Node Centroid Merging (2.1.4)
-    final_G = merge_nearby_junctions(initial_G, d_euclid=d_euclid, d_edge_factor=d_edge_factor)
+    raw_G = trace_skeleton_to_graph(
+        skeleton, nodes, node_types, node_grid, node_members, scale_factor
+    )
+    rdp_G = apply_rdp_to_graph(raw_G, epsilon=rdp_epsilon)
+    merged_G = merge_nearby_junctions(rdp_G, d_edge_thresh=d_edge_thresh)
+    final_G = prune_whiskers_and_noise(merged_G, whisker_thresh=whisker_thresh, min_comp_len=min_comp_len)
 
     return final_G, skeleton, canvas_diag, scale_factor
-
-
-# ==========================================================
-# VERIFICATION RUN
-# ==========================================================
-
-if __name__ == "__main__":
-    canvas = np.full((350, 450, 3), 255, dtype=np.uint8)
-    
-    # Draw sample lines ~10px wide
-    for w in range(-4, 5):
-        canvas[100:180, np.clip(120 + w, 0, 449)] = 0
-        canvas[100:180, np.clip(200 + w, 0, 449)] = 0
-        canvas[np.clip(100 + w, 0, 349), 120:200] = 0
-        canvas[np.clip(180 + w, 0, 349), 120:200] = 0
-        canvas[np.clip(138 + w, 0, 349), 120:200] = 0
-        canvas[np.clip(142 + w, 0, 349), 120:200] = 0
-
-    test_png = "crop_proportion_test.png"
-    Image.fromarray(canvas).save(test_png)
-
-    # Specify input stroke width manually
-    graph, cropped_skel, diag, scale = build_graph_from_image(
-        test_png,
-        input_stroke_width=10.0,   # Set to whatever stroke width you want
-        target_stroke_width=4.0,   # Target scaled thickness
-        d_euclid_prop=0.02,        # 2% of content diagonal
-        d_edge_factor=3.0,
-        rdp_epsilon_prop=0.004     # 0.4% of content diagonal
-    )
-
-    print(f"\nFinal Graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
-
-    plt.figure(figsize=(7, 7))
-    for u, v, k, data in graph.edges(keys=True, data=True):
-        pts = data["pts"]
-        plt.plot(pts[:, 0], pts[:, 1], "k-", linewidth=2)
-    for n, data in graph.nodes(data=True):
-        pos = data["pos"]
-        plt.scatter(pos[0], pos[1], color="red", s=50, zorder=5)
-
-    plt.title("Cropped & Proportionally Merged Graph")
-    plt.axis("equal")
-    plt.grid(True)
-    plt.show()
