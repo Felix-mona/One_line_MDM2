@@ -29,17 +29,17 @@ from route_mapping import (
 # ==========================================================
 
 # 1. File Input / Output
-IMAGE_PATH              = "Example_images/Shapes.png"  # Path to input sketch or drawing
+IMAGE_PATH              = "bridge.png"  # Path to input sketch or drawing
 OUTPUT_DIR              = "outputs"                    # Folder where all plots & polylines are saved
 SAVE_POLYLINE           = True                         # Save final continuous polyline (.npy)
 
 # 2. Rescaling & Binarisation (Section 2.1.1)
-INPUT_STROKE_WIDTH      = 2                          # Estimated input stroke thickness in pixels
-TARGET_STROKE_WIDTH     = 2                          # Normalised stroke thickness for skeletonisation
+INPUT_STROKE_WIDTH      = 10                          # Estimated input stroke thickness in pixels
+TARGET_STROKE_WIDTH     = 10                          # Normalised stroke thickness for skeletonisation
 BINARISE_THRESH         = 128                          # Grayscale binarisation threshold (0-255)
 
 # 3. Decimation & Node Merging (Sections 2.1.3 - 2.1.4)
-RDP_EPSILON_PROP        = 0.002                        # RDP tolerance as a fraction of diagonal D (0.2%)
+RDP_EPSILON_PROP        = 0.000001                        # RDP tolerance as a fraction of diagonal D (0.2%)
 D_EUCLID_PROP           = 0.008                        # Spatial node merge radius as fraction of D (0.8%)
 D_EDGE_FACTOR           = 2.5                          # Multiplier on d_euclid for short junction edge merging
 
