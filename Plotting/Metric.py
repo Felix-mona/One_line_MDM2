@@ -76,10 +76,24 @@ def gather_lowest_metric(coefficients,max_frequency_cutoff,samples,alpha_beta_pa
 
 
 
-def len_btwn_points(A, B):
-    AB = (A - B)**2
-    len = np.sqrt(abs(AB[:,:1] + AB[:,1:]))
+def len_btwn_points(a, b):
+    ab = b - a
+    len = np.sqrt(abs(ab[:,:1] + ab[:,1:]))
     return len
+
+
+def calculate_distances(coords1: np.ndarray, coords2: np.ndarray) -> np.ndarray:
+    """
+    Calculate the Euclidean distance between pairs of (x, y) coordinates.
+
+    Args:
+        coords1: NumPy array of shape (N, 2).
+        coords2: NumPy array of shape (N, 2).
+
+    Returns:
+        NumPy array of shape (N,) containing the distances.
+    """
+    return np.linalg.norm(coords1 - coords2, axis=1)
 
 
 def calc_metric(new_image,old_image,mtype=None):
@@ -119,17 +133,20 @@ def calc_metric(new_image,old_image,mtype=None):
         """
         smoothness branch
         """
-        A_coords = np.column_stack((np.real(new_image)), np.imag(new_image))  # makes a list of x,y coords from the new image
-        B_coords = np.delete(np.vstack([A_coords[-1],A_coords]), (-1), axis=0) # shifts the list one along the path and one backwards along the path
-        C_coords = np.delete(np.vstack([A_coords,A_coords[0]]), (0), axis=0)
+        A_coords = np.column_stack((np.real(new_image), np.imag(new_image))) # makes a list of x,y coords from the new image
+        B_coords = np.roll(A_coords, 1, axis=0)
+        C_coords = np.roll(A_coords, -1, axis=0)
 
-        c = len_btwn_points(A_coords,B_coords) # calculates three distances between the three current points
-        b = len_btwn_points(A_coords,C_coords)
-        a = len_btwn_points(B_coords,B_coords)
+        c = calculate_distances(A_coords, B_coords) # calculates three distances between the three current points
+        b = calculate_distances(A_coords, C_coords)
+        a = calculate_distances(B_coords, C_coords)
 
-        angle = np.arcos((b**2 + c**2 - a**2) / (2*b*c)) # takes the cosine rule between the points to find the middle angle
+        # takes the cosine rule between the points to find the middle angle
+        cos_angle = (b**2 + c**2 - a**2) / (2*b*c)
+        cos_angle = np.clip(cos_angle, -1.0, 1.0)
 
-        return np.mean(angle/np.pi)  # returns the mean angle of all the different points within the list.
+        angle = np.arccos(cos_angle)
+        return 1 - np.mean(angle/np.pi)  # returns the mean angle of all the different points within the list.
 
     else:
         pass
