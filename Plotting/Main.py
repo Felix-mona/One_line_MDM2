@@ -14,21 +14,29 @@ before just pressing play, some code should commented out otherwise its all a me
 
 Accuracy - the hausdorf distance, between x and y (0,1) euclidian percentage distance between the original and new image, where 0 is perfect and 1 is the worst case scenario.
 Fixed decided accuracies - 0.002,0.005,0.05,0.1,0.2
-"""
 
+Plots for the survey:
+- plots of each curve at same accuracy and smoothness thresholds, labeled
+- check for the thresholds, they might be different for each image. 
+- plot the accuracy and smoothness over frequencies for every image
+- hausdorf distance thats been taken 
+- graph of the different thresholds cutting through the smoothness and accuracy.
+ 
+"""
+#0.12
 
 FILEPATH = r"C:\Users\felix\Uni\Year 2\MDM2\Primitive_line_project\Project_Files\One_line_MDM2\Images\Indonesia\Indonesia_output_polyline.svg"
 N_SAMPLES = 1000
-ACCURACIES = [(0.002),
-              (0.005),
-              (0.05),
-              (0.1),
-              (0.2)]
-SMOOTHNESS = [(0.03),
-              (0.04),
-              (0.06),
-              (0.1),
-              (0.13)] # will be filled with the smoothness values for each accuracy threshold, to be used in the loss function
+ACCURACIES = [(0.01),
+              (0.034),
+              (0.058),
+              (0.082),
+              (0.106)]
+SMOOTHNESS = [(0.01),
+              (0.034),
+              (0.058),
+              (0.082),
+              (0.106)] # will be filled with the smoothness values for each accuracy threshold, to be used in the loss function
 
 image_1 = Image(str(FILEPATH),N_SAMPLES)
 image_1.sample_paths() # fills the object with the complex coords
@@ -37,7 +45,7 @@ coeffs, freqs = fourier.forward_fourier(image_1.points) #gathers complex coeffic
 best_k = [] # initialised to be filled with the best frequency cutoffs for each accuracy threshold
 best_k_indexes = [] # holds the coords where the best k is found, for plotting the shortest distance between the two curves
 
-"""
+
 # basic loop that increases the frequency cutoff by 1 until the accuracy threshold is reached, or the maximum frequency cutoff is reached. The best frequency cutoff for each accuracy threshold is stored in best_k
 for accuracy_thresh in ACCURACIES:
     max_pointer = int(N_SAMPLES/2)
@@ -67,28 +75,28 @@ for accuracy_thresh in ACCURACIES:
 # comment out lines that you do not need
 for i in range(5):
     complex_coords = fourier.inverse_fourier_descriptors(fourier.filter_coeffs(coeffs, best_k[i]))
-    longest_distance = [(np.real(image_1.points[index[0][0]]),np.imag(image_1.points[index[0][0]])),(np.real(inverse[index[1][0]]),np.imag(inverse[index[1][0]]))] 
+    #longest_distance = [(np.real(image_1.points[index[0][0]]),np.imag(image_1.points[index[0][0]])),(np.real(inverse[index[1][0]]),np.imag(inverse[index[1][0]]))] 
     x,y = np.real(complex_coords), np.imag(complex_coords)
 
     # Plotting the new image over the original image
     plt.plot(x,y,label=f'{best_k[i]} K cutoff')
-    plt.plot(np.real(image_1.points),np.imag(image_1.points),label=f'Original Image')
+    #plt.plot(np.real(image_1.points),np.imag(image_1.points),label=f'Original Image')
 
     # plots the points where the hausdorf distance was taken from
-    plt.plot(np.real(image_1.points[index[0][0]]),np.imag(image_1.points[index[0][0]]),'ro',label='Furthest point from new image')
-    plt.plot(np.real(inverse[index[1][0]]),np.imag(inverse[index[1][0]]),'go',label='Furthest point from original image')
+    #plt.plot(np.real(image_1.points[index[0][0]]),np.imag(image_1.points[index[0][0]]),'ro',label='Furthest point from new image')
+    #plt.plot(np.real(inverse[index[1][0]]),np.imag(inverse[index[1][0]]),'go',label='Furthest point from original image')
 
     #plots the line between the two points for the hausdorf distance
-    plt.plot([longest_distance[0][0],longest_distance[1][0]],[longest_distance[0][1],longest_distance[1][1]],'k--',label='Longest distance between points') 
+    #plt.plot([longest_distance[0][0],longest_distance[1][0]],[longest_distance[0][1],longest_distance[1][1]],'k--',label='Longest distance between points') 
 
-    plt.title(f'Indonesia {i}', fontsize=20)
+    plt.title(f'Indonesia Accuracy {ACCURACIES[i]}', fontsize=20)
     plt.axis('off')
     plt.legend()
 
     #saves the plot created within the current directory, NOT the same one as the Main.py
-    plt.savefig(f"Indonesia_A{ACCURACIES[i]}.png", bbox_inches='tight', pad_inches=0)
+    #plt.savefig(f"Indonesia_A{ACCURACIES[i]}.png", bbox_inches='tight', pad_inches=0)
     plt.show()
-"""
+
 
 #-------------------------------------------------------------------------------
 """
@@ -134,7 +142,7 @@ plt.show()
 #---------------------------------------------------------------------------------------------
 
 
-
+"""
 ## Plotting the smoothness over k and the accuracy over k
 
 frequencies = np.linspace(1,N_SAMPLES/2,N_SAMPLES//2)
@@ -161,9 +169,9 @@ plt.legend()
 plt.show()
 
 
+"""
 
-
-
+"""
 # basic loop that increases the frequency cutoff by 1 until the accuracy threshold is reached, or the maximum frequency cutoff is reached. The best frequency cutoff for each accuracy threshold is stored in best_k
 for smoothness_thresh in SMOOTHNESS:
     min_pointer = 1
@@ -206,7 +214,7 @@ for i in range(5):
     #plots the line between the two points for the hausdorf distance
     #plt.plot([longest_distance[0][0],longest_distance[1][0]],[longest_distance[0][1],longest_distance[1][1]],'k--',label='Longest distance between points') 
 
-    plt.title(f'Indonesia {i}', fontsize=20)
+    plt.title(f'Indonesia smoothness {SMOOTHNESS[i]}', fontsize=20)
     plt.axis('off')
     plt.legend()
 
@@ -215,7 +223,7 @@ for i in range(5):
     plt.show()
 
 
-
+"""
 
 
 

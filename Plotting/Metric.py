@@ -96,60 +96,75 @@ def calculate_distances(coords1: np.ndarray, coords2: np.ndarray) -> np.ndarray:
     return np.linalg.norm(coords1 - coords2, axis=1)
 
 
-def calc_metric(new_image,old_image,mtype=None):
-    """
-    Calculates the hausdorf distance between the original image and the redrawn but with restricted frequencies image
-    INPUT:
-     - new_image, array of the new complex coords of the redrawn image
-     - old_image, array of the complex coords from the original image
-     - mtype, string between 'accuracy' or 'smoothness'
 
-    OUTPUT:
-     - float, [0,1] the accuracy rating of the redrawn image
-    """
-    
+def calc_metric(new_image, old_image, mtype=None):
+
     if mtype == 'accuracy' or mtype == 'Accuracy':
-        """
-        accuracy branch
-        Symmetric Hausdorff distance between two sets of complex points.
 
-        old_points, new_points : 1D arrays of complex numbers (can be different lengths)
+        A = np.column_stack((
+            np.real(old_image),
+            np.imag(old_image)
+        ))
 
-        Returns a float: the largest distance from any point in one set
-        to its nearest neighbour in the other set.
-        """
-        A = np.column_stack((np.real(old_image), np.imag(old_image)))
-        B = np.column_stack((np.real(new_image), np.imag(new_image)))
+        B = np.column_stack((
+            np.real(new_image),
+            np.imag(new_image)
+        ))
 
-        index = [(directed_hausdorff(A, B)[1],directed_hausdorff(A, B)[2]), (directed_hausdorff(B, A)[1], directed_hausdorff(B, A)[2])] # the index of the point in the original image that is furthest away from the new image and vice versa
-        d = max(directed_hausdorff(A, B)[0], directed_hausdorff(B, A)[0])# symmetric hausdorf distance between the two sets of points
+        # Calculate each directed Hausdorff distance
+        d1, i1, j1 = directed_hausdorff(A, B)
+        d2, i2, j2 = directed_hausdorff(B, A)
 
+        # Determine which direction produces the Hausdorff distance
+        if d1 >= d2:
+            d = d1
+            point1 = i1  # Original image
+            point2 = j1  # Nearest reconstructed point
+            direction = 'original_to_reconstructed'
+
+        else:
+            d = d2
+            point1 = j2  # Nearest original point
+            point2 = i2  # Reconstructed image
+            direction = 'reconstructed_to_original'
+
+        # Normalise by image scale
         both = np.concatenate((old_image, new_image))
-        scale = np.hypot(np.ptp(both.real), np.ptp(both.imag))
-        
-        return d / scale if scale > 0 else 0.0,index # normalise the distance by the scale of the image, if the scale is 0 then return 0.0
-    
+        scale = np.hypot(
+            np.ptp(both.real),
+            np.ptp(both.imag)
+        )
+
+        accuracy = d / scale if scale > 0 else 0.0
+
+        index = (point1, point2, direction)
+
+        return accuracy, index
+
     elif mtype == 'smoothness' or mtype == 'Smoothness':
-        """
-        smoothness branch
-        """
-        A_coords = np.column_stack((np.real(new_image), np.imag(new_image))) # makes a list of x,y coords from the new image
+
+        A_coords = np.column_stack((
+            np.real(new_image),
+            np.imag(new_image)
+        ))
+
         B_coords = np.roll(A_coords, 1, axis=0)
         C_coords = np.roll(A_coords, -1, axis=0)
 
-        c = calculate_distances(A_coords, B_coords) # calculates three distances between the three current points
+        c = calculate_distances(A_coords, B_coords)
         b = calculate_distances(A_coords, C_coords)
         a = calculate_distances(B_coords, C_coords)
 
-        # takes the cosine rule between the points to find the middle angle
         cos_angle = (b**2 + c**2 - a**2) / (2*b*c)
         cos_angle = np.clip(cos_angle, -1.0, 1.0)
 
         angle = np.arccos(cos_angle)
-        return 1 - np.mean(angle/np.pi)  # returns the mean angle of all the different points within the list.
+
+        return 1 - np.mean(angle/np.pi)
 
     else:
         pass
+
 
 
 
