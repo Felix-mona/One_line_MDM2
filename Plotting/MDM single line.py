@@ -5,8 +5,8 @@ import svgwrite
 from pathlib import Path
 
 base_dir = Path.cwd()
-npy_path = base_dir / "outputs" / "bridge" / "bridge_output_polyline.npy"
-svg_path = base_dir / "outputs" / "bridge" / "bridge_output_polyline.svg"
+npy_path = base_dir / "outputs" / "HedgehogMDM" / "HedgehogMDM_output_polyline.npy"
+svg_path = base_dir / "outputs" / "HedgehogMDM" / "HedgehogMDM_output_polyline.svg"
 
 # Ensure output directory exists
 svg_path.parent.mkdir(parents=True, exist_ok=True)
