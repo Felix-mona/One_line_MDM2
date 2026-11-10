@@ -48,7 +48,7 @@ def filter_coeffs(coefficients, cutoff=None):
     if cutoff is None:
         return coefficients
 
-    if cutoff is -1:
+    if cutoff == -1:
         return None
 
     n = len(coefficients)
