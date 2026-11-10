@@ -75,6 +75,13 @@ def gather_lowest_metric(coefficients,max_frequency_cutoff,samples,alpha_beta_pa
     return combination_per_freq
 
 
+
+def len_btwn_points(A, B):
+    AB = (A - B)**2
+    len = np.sqrt(abs(AB[:,:1] + AB[:,1:]))
+    return len
+
+
 def calc_metric(new_image,old_image,mtype=None):
     """
     Calculates the hausdorf distance between the original image and the redrawn but with restricted frequencies image
@@ -100,21 +107,29 @@ def calc_metric(new_image,old_image,mtype=None):
         A = np.column_stack((np.real(old_image), np.imag(old_image)))
         B = np.column_stack((np.real(new_image), np.imag(new_image)))
 
-        d = max(directed_hausdorff(A, B)[0], directed_hausdorff(B, A)[0])
+        index = [(directed_hausdorff(A, B)[1],directed_hausdorff(A, B)[2]), (directed_hausdorff(B, A)[1], directed_hausdorff(B, A)[2])] # the index of the point in the original image that is furthest away from the new image and vice versa
+        d = max(directed_hausdorff(A, B)[0], directed_hausdorff(B, A)[0])# symmetric hausdorf distance between the two sets of points
 
         both = np.concatenate((old_image, new_image))
         scale = np.hypot(np.ptp(both.real), np.ptp(both.imag))
         
-        return d / scale if scale > 0 else 0.0
+        return d / scale if scale > 0 else 0.0,index # normalise the distance by the scale of the image, if the scale is 0 then return 0.0
     
     elif mtype == 'smoothness' or mtype == 'Smoothness':
         """
         smoothness branch
-
-        
-        
         """
-        return round(np.random.random(),2)
+        A_coords = np.column_stack((np.real(new_image)), np.imag(new_image))  # makes a list of x,y coords from the new image
+        B_coords = np.delete(np.vstack([A_coords[-1],A_coords]), (-1), axis=0) # shifts the list one along the path and one backwards along the path
+        C_coords = np.delete(np.vstack([A_coords,A_coords[0]]), (0), axis=0)
+
+        c = len_btwn_points(A_coords,B_coords) # calculates three distances between the three current points
+        b = len_btwn_points(A_coords,C_coords)
+        a = len_btwn_points(B_coords,B_coords)
+
+        angle = np.arcos((b**2 + c**2 - a**2) / (2*b*c)) # takes the cosine rule between the points to find the middle angle
+
+        return np.mean(angle/np.pi)  # returns the mean angle of all the different points within the list.
 
     else:
         pass

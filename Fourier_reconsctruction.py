@@ -48,6 +48,9 @@ def filter_coeffs(coefficients, cutoff=None):
     if cutoff is None:
         return coefficients
 
+    if cutoff is -1:
+        return None
+
     n = len(coefficients)
     cutoff = min(int(cutoff), (n-1)//2 ) # trims the highest cut off to be within the N//2 real, so that there will not be any errors, or will use the cutoff value given
 
@@ -69,7 +72,11 @@ def inverse_fourier_descriptors(coefficients):
     Output:
     - z: a list of imaginary numbers representing the path at distance s from start, [(x + yj)]
     """
-    z = fft.ifft(coefficients, norm="forward") #
+    if coefficients is None:
+        print("error, no coefficients given")
+        return None
+
+    z = fft.ifft(coefficients, norm="forward") 
     return z
 
 
