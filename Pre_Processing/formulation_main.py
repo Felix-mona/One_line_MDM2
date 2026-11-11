@@ -29,27 +29,30 @@ from route_mapping import (
 # ==========================================================
 
 # 1. File Input / Output
-IMAGE_PATH              = "Indonesia.png"  # Path to input sketch or drawing
-OUTPUT_DIR              = "outputs"                    # Folder where all plots & polylines are saved
+IMAGE_PATH              = "images/Sunflower/Sunflower.png"  # Path to input sketch or drawing
+OUTPUT_DIR              = "images/Sunflower"                    # Folder where all plots & polylines are saved
 SAVE_POLYLINE           = True                         # Save final continuous polyline (.npy)
 
 # 2. Rescaling & Binarisation (Section 2.1.1)
-INPUT_STROKE_WIDTH      = 10                          # Estimated input stroke thickness in pixels
-TARGET_STROKE_WIDTH     = 10                          # Normalised stroke thickness for skeletonisation
+INPUT_STROKE_WIDTH      = 10                           # Estimated input stroke thickness in pixels
+TARGET_STROKE_WIDTH     = 10                           # Normalised stroke thickness for skeletonisation
 BINARISE_THRESH         = 128                          # Grayscale binarisation threshold (0-255)
 
 # 3. Decimation & Node Merging (Sections 2.1.3 - 2.1.4)
-RDP_EPSILON_PROP        = 0.000001                        # RDP tolerance as a fraction of diagonal D (0.2%)
+RDP_EPSILON_PROP        = 0.001                     # RDP tolerance as a fraction of diagonal D
 D_EUCLID_PROP           = 0.008                        # Spatial node merge radius as fraction of D (0.8%)
 D_EDGE_FACTOR           = 2.5                          # Multiplier on d_euclid for short junction edge merging
 
 # 4. Double MST Component Bridging (Sections 2.1.4 & 2.2.1)
-MAX_EDGE_LEN_PROP       = 0.10                         # Long-edge subdivision threshold as fraction of D (10%)
-CORNER_SPLIT_ANGLE_DEG  = 65.0                         # Split sharp corners above this turn angle (degrees)
-EVEN_DEGREE_PENALTY     = 1.8                          # Cost penalty on even-degree subdivision nodes
-INTERSECTION_PENALTY    = 15.0                         # Multiplier penalty per crossed stroke segment
-EDGE_REUSE_PENALTY      = 100.0                        # Heavy penalty on reusing Pass 1 bridges in Pass 2
-NODE_REUSE_PENALTY      = 2.5                          # Penalty on reusing the same entry/exit node
+MAX_EDGE_LEN_PROP       = 0.05                         # Edge subdivision limit as fraction of diagonal D (10%)
+CORNER_SPLIT_ANGLE_DEG  = 65.0                     # Split sharp corners above this turn angle (degrees)
+EVEN_DEGREE_PENALTY     = 5                          # Cost multiplier for untouched even-degree nodes
+ODD_JUNCTION_PENALTY    = 0.5                        # Cost multiplier for odd-degree nodes (and reused nodes turned odd)
+CORNER_PENALTY          = 1                         # Cost multiplier for sharp geometric corner vertices
+INTERSECTION_PENALTY    = 25.0                         # Multiplier penalty per crossed stroke or prior bridge
+EDGE_REUSE_PENALTY      = 10.0                        # Heavy penalty preventing duplicate bridge edges in Pass 2
+COMP_REUSE_PENALTY      = 1.35                         # Penalty for placing a return bridge between the same component pair
+PRUNE_REDUNDANT_BRIDGES = True                         # Prune excess bridge pairs/cycles from components with >= 4 bridges
 
 # 5. Plot Saving Flags
 SAVE_SKELETON_IMAGE     = True                         # Save 01_skeleton.png
@@ -110,9 +113,12 @@ def run_pipeline():
         max_edge_len_prop=MAX_EDGE_LEN_PROP,
         corner_angle_deg=CORNER_SPLIT_ANGLE_DEG,
         even_degree_penalty=EVEN_DEGREE_PENALTY,
+        odd_junction_penalty=ODD_JUNCTION_PENALTY,
+        corner_penalty=CORNER_PENALTY,
         intersection_penalty=INTERSECTION_PENALTY,
         edge_reuse_penalty=EDGE_REUSE_PENALTY,
-        node_reuse_penalty=NODE_REUSE_PENALTY,
+        comp_reuse_penalty=COMP_REUSE_PENALTY,
+        prune_redundant=PRUNE_REDUNDANT_BRIDGES,
     )
 
     if not nx.is_connected(bridged_graph):
