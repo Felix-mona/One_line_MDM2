@@ -9,6 +9,7 @@ base_dir = Path.cwd()
 figure_folder = base_dir / "outputs" / "fourier_figures"
 figure_folder.mkdir(parents=True, exist_ok=True) 
 
+
 npy_path = base_dir / "outputs" / "HedgehogMDM" / "HedgehogMDM_output_polyline.npy"
 svg_path = base_dir / "outputs" / "HedgehogMDM" / "HedgehogMDM_output_polyline.svg"
 
