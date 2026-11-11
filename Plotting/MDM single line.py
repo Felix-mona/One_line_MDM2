@@ -12,8 +12,8 @@ figure_folder = base_dir / "outputs" / "fourier_figures"
 figure_folder.mkdir(parents=True, exist_ok=True) 
 
 
-npy_path = base_dir / "images" / "Bristol_Logo" / "blogo_outline" / "blogo_outline_output_polyline.npy"
-svg_path = base_dir / "images" / "Bristol_Logo" / "blogo_outline" / "blogo_outline_output_polyline.svg"
+npy_path = base_dir / "images" / "sunflower" / "sunflower" / "sunflower_output_polyline.npy"
+svg_path = base_dir / "images" / "sunflower" / "sunflower" / "sunflower_output_polyline.svg"
 
 
 # Load numpy array and convert to points list
@@ -86,7 +86,7 @@ plt.plot(smooth_x, smooth_y , color='blue', linewidth=2)
 plt.axis('equal') #no stretch
 
 
-plt.savefig(figure_folder / f"blogo_{number_of_frequencies_kept_2}.png", dpi=200, bbox_inches="tight")
+plt.savefig(figure_folder / f"Indonesia_{number_of_frequencies_kept_2}.png", dpi=200, bbox_inches="tight")
 
 
 
