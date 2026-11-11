@@ -2,7 +2,8 @@
 Double MST Component Bridging (Sections 2.1.4 & 2.2.1)
 Splits sharp corners and long edges, then connects disconnected sub-graphs into a
 single connected graph using two passes of Kruskal's Minimum Spanning Tree with
-perceptual penalties and exact T-join even-parity pruning.
+additive perceptual penalties, dynamic bridge-crossing penalties, dynamic parity-aware
+node reuse, exact T-join even-parity pruning, and redundant cycle pruning.
 """
 
 import numpy as np
@@ -26,11 +27,12 @@ def split_edges_at_sharp_corners(G, max_turn_angle_deg=65.0):
     next_id = max(H.nodes, default=-1) + 1
 
     for u, v, k, data in list(H.edges(keys=True, data=True)):
-        pts = data["pts"]
+        pts = np.asarray(data["pts"], dtype=float)
         if len(pts) < 3:
             continue
 
-        pos_u, pos_v = H.nodes[u]["pos"], H.nodes[v]["pos"]
+        pos_u = np.asarray(H.nodes[u]["pos"], dtype=float)
+        pos_v = np.asarray(H.nodes[v]["pos"], dtype=float)
         if u != v and (
             np.linalg.norm(pts[0] - pos_u) + np.linalg.norm(pts[-1] - pos_v)
             > np.linalg.norm(pts[-1] - pos_u) + np.linalg.norm(pts[0] - pos_v)
@@ -112,8 +114,9 @@ def split_long_edges(G, max_edge_len):
     next_id = max(G.nodes, default=-1) + 1
 
     for u, v, k, data in G.edges(keys=True, data=True):
-        pts = data["pts"]
-        pos_u, pos_v = G.nodes[u]["pos"], G.nodes[v]["pos"]
+        pts = np.asarray(data["pts"], dtype=float)
+        pos_u = np.asarray(G.nodes[u]["pos"], dtype=float)
+        pos_v = np.asarray(G.nodes[v]["pos"], dtype=float)
         if u != v and (
             np.linalg.norm(pts[0] - pos_u) + np.linalg.norm(pts[-1] - pos_v)
             > np.linalg.norm(pts[-1] - pos_u) + np.linalg.norm(pts[0] - pos_v)
@@ -166,7 +169,7 @@ def segments_intersect(p1, p2, p3, p4):
 
 
 def count_edge_intersections(p_start, p_end, all_segments):
-    """Counts how many existing stroke segments a candidate bridge crosses."""
+    """Counts how many existing line segments a candidate bridge crosses."""
     crossings = 0
     for s_pt, e_pt in all_segments:
         if (
@@ -185,19 +188,108 @@ def count_edge_intersections(p_start, p_end, all_segments):
 # 3. DOUBLE MST BRIDGING & PARITY BALANCING (SECTION 2.2.1)
 # ==========================================================
 
-def _node_penalty_multiplier(G, n, even_degree_penalty):
+def _node_additive_penalty(
+    G,
+    n,
+    even_degree_penalty=1.8,
+    odd_junction_penalty=0.15,
+    corner_penalty=0.35,
+    incident_bridges=0,
+):
     """
-    Prefers degree-1 endpoints (1.0) and odd junctions (1.15), then sharp
-    corners (1.35), and penalises flat subdivision nodes (even_degree_penalty).
+    Computes additive penalty weight p(n) >= 0.0 based on effective total degree.
     """
-    deg = G.degree(n)
-    if deg == 1:
-        return 1.0
-    if deg % 2 == 1:
-        return 1.15
+    total_deg = G.degree(n) + incident_bridges
+    even_pen = max(0.0, even_degree_penalty - 1.0)
+
+    if total_deg == 1:
+        return 0.0
+    if total_deg % 2 == 1:
+        return odd_junction_penalty
     if G.nodes[n].get("kind") == "corner":
-        return 1.35
-    return even_degree_penalty
+        return corner_penalty
+    if incident_bridges > 0:
+        return max(0.0, even_pen - 0.10)
+    return even_pen
+
+
+def _prune_redundant_bridges(bridges, num_comp):
+    """
+    Removes redundant parallel pairs and simple cycles of bridges among
+    components with >= 4 bridges, keeping the graph connected and all
+    component bridge degrees even (>= 2).
+    """
+    kept = list(bridges)
+
+    def is_connected(b_list):
+        mg = nx.Graph()
+        mg.add_nodes_from(range(num_comp))
+        mg.add_edges_from((b["ci"], b["cj"]) for b in b_list)
+        return nx.is_connected(mg)
+
+    changed = True
+    while changed:
+        changed = False
+        deg = {c: 0 for c in range(num_comp)}
+        for b in kept:
+            deg[b["ci"]] += 1
+            deg[b["cj"]] += 1
+
+        high_idxs = [
+            idx for idx, b in enumerate(kept)
+            if deg[b["ci"]] >= 4 and deg[b["cj"]] >= 4
+        ]
+        if len(high_idxs) < 2:
+            break
+
+        # Pass A: Prune parallel 2-cycles between same components
+        by_pair = {}
+        for idx in high_idxs:
+            pair = (min(kept[idx]["ci"], kept[idx]["cj"]), max(kept[idx]["ci"], kept[idx]["cj"]))
+            by_pair.setdefault(pair, []).append(idx)
+
+        pair_cands = [idxs for idxs in by_pair.values() if len(idxs) >= 2]
+        pair_cands.sort(
+            key=lambda idxs: sum(sorted((kept[i]["base_cost"] for i in idxs), reverse=True)[:2]),
+            reverse=True,
+        )
+        for idxs in pair_cands:
+            worst_two = sorted(idxs, key=lambda i: kept[i]["base_cost"], reverse=True)[:2]
+            trial = [b for i, b in enumerate(kept) if i not in set(worst_two)]
+            if is_connected(trial):
+                kept = trial
+                changed = True
+                break
+        if changed:
+            continue
+
+        # Pass B: Prune simple cycles (length >= 3)
+        aux = nx.Graph()
+        edge_map = {}
+        for idx in high_idxs:
+            ci, cj = kept[idx]["ci"], kept[idx]["cj"]
+            cost = kept[idx]["base_cost"]
+            if not aux.has_edge(ci, cj) or cost > aux[ci][cj]["cost"]:
+                aux.add_edge(ci, cj, cost=cost)
+                edge_map[(min(ci, cj), max(ci, cj))] = idx
+
+        cycles = nx.cycle_basis(aux)
+        cycles.sort(
+            key=lambda cyc: sum(aux[cyc[k]][cyc[(k + 1) % len(cyc)]]["cost"] for k in range(len(cyc))),
+            reverse=True,
+        )
+        for cyc in cycles:
+            drop = {
+                edge_map[(min(cyc[k], cyc[(k + 1) % len(cyc)]), max(cyc[k], cyc[(k + 1) % len(cyc)]))]
+                for k in range(len(cyc))
+            }
+            trial = [b for i, b in enumerate(kept) if i not in drop]
+            if is_connected(trial):
+                kept = trial
+                changed = True
+                break
+
+    return kept
 
 
 def double_mst_bridging(
@@ -206,15 +298,20 @@ def double_mst_bridging(
     max_edge_len_prop=0.10,
     corner_angle_deg=65.0,
     even_degree_penalty=1.8,
+    odd_junction_penalty=0.15,
+    corner_penalty=0.35,
     intersection_penalty=15.0,
     edge_reuse_penalty=100.0,
-    node_reuse_penalty=2.5,
+    comp_reuse_penalty=1.35,
+    prune_redundant=True,
+    **kwargs,
 ):
     """
     1. Splits sharp corners and subdivides long edges.
-    2. Connects disconnected components using a 2-pass Kruskal MST.
-    3. Applies T-join parity pruning on Pass 2 so every component has an even
-       number of bridges (>= 2) while keeping the graph connected.
+    2. Connects disconnected components using a 2-pass Kruskal MST with dynamic
+       stroke/bridge crossing penalties and dynamic parity-aware node reuse.
+    3. Applies T-join parity pruning on Pass 2, and optionally prunes redundant cycles
+       so every component has an even number of bridges (>= 2).
     """
     G = split_edges_at_sharp_corners(G, max_turn_angle_deg=corner_angle_deg)
     G = split_long_edges(G, max_edge_len=max_edge_len_prop * canvas_diag)
@@ -227,99 +324,154 @@ def double_mst_bridging(
 
     print(f"Subdivided graph: {G.number_of_nodes()} nodes across {num_comp} disconnected components.")
 
-    all_segments = []
+    stroke_segments = []
     for _, _, d in G.edges(data=True):
-        pts = d["pts"]
+        pts = np.asarray(d["pts"], dtype=float)
         for k in range(len(pts) - 1):
-            all_segments.append((pts[k], pts[k + 1]))
+            stroke_segments.append((pts[k], pts[k + 1]))
 
-    node_mult = {n: _node_penalty_multiplier(G, n, even_degree_penalty) for n in G.nodes()}
+    node_pen_init = {
+        n: _node_additive_penalty(
+            G, n, even_degree_penalty, odd_junction_penalty, corner_penalty, 0
+        )
+        for n in G.nodes()
+    }
     candidate_bridges = {}
 
     for i in range(num_comp):
         comp_i = components[i]
-        pts_i = np.array([G.nodes[u]["pos"] for u in comp_i])
+        pts_i = np.array([G.nodes[u]["pos"] for u in comp_i], dtype=float)
+        pen_i = np.array([node_pen_init[u] for u in comp_i])[:, None]
+        max_per_u = max(2, 12 // len(comp_i))
 
         for j in range(i + 1, num_comp):
             comp_j = components[j]
-            pts_j = np.array([G.nodes[v]["pos"] for v in comp_j])
+            pts_j = np.array([G.nodes[v]["pos"] for v in comp_j], dtype=float)
+            pen_j = np.array([node_pen_init[v] for v in comp_j])[None, :]
+            max_per_v = max(2, 12 // len(comp_j))
 
-            # Vectorised distance matrix to pre-filter the closest candidate pairs
             dist_mat = np.hypot(
                 pts_i[:, 0, None] - pts_j[None, :, 0],
                 pts_i[:, 1, None] - pts_j[None, :, 1],
             )
-            pen_i = np.array([node_mult[u] for u in comp_i])[:, None]
-            pen_j = np.array([node_mult[v] for v in comp_j])[None, :]
-            approx_cost = dist_mat * pen_i * pen_j
 
-            flat_order = np.argsort(approx_cost.ravel())[:16]
+            approx_cost = dist_mat * (1.0 + pen_i + pen_j)
+            flat_order = np.argsort(approx_cost.ravel())
             candidates = []
+            u_counts, v_counts = {}, {}
+
             for flat_idx in flat_order:
                 idx_u, idx_v = np.unravel_index(flat_idx, dist_mat.shape)
                 u, v = comp_i[idx_u], comp_j[idx_v]
+                if u_counts.get(u, 0) >= max_per_u or v_counts.get(v, 0) >= max_per_v:
+                    continue
+                u_counts[u] = u_counts.get(u, 0) + 1
+                v_counts[v] = v_counts.get(v, 0) + 1
+
                 pos_u, pos_v = pts_i[idx_u], pts_j[idx_v]
                 dist = float(dist_mat[idx_u, idx_v])
-
-                crossings = count_edge_intersections(pos_u, pos_v, all_segments)
-                cost = float(approx_cost[idx_u, idx_v]) * (1.0 + intersection_penalty * crossings)
+                stroke_crossings = count_edge_intersections(pos_u, pos_v, stroke_segments)
+                base_cost = dist * (1.0 + pen_i[idx_u, 0] + pen_j[0, idx_v]) * (1.0 + intersection_penalty * stroke_crossings)
 
                 candidates.append({
                     "u": u,
                     "v": v,
                     "ci": i,
                     "cj": j,
+                    "pos_u": pos_u,
+                    "pos_v": pos_v,
                     "dist": dist,
-                    "base_cost": cost,
-                    "intersections": crossings,
+                    "base_cost": base_cost,
+                    "stroke_crossings": stroke_crossings,
                 })
+                if len(candidates) >= 16:
+                    break
 
             candidates.sort(key=lambda c: c["base_cost"])
-            candidate_bridges[(i, j)] = candidates[:8]
+            candidate_bridges[(i, j)] = candidates[:10]
 
-    def build_component_mst(cost_fn):
-        best_edges = []
-        for (ci, cj), cand_list in candidate_bridges.items():
-            best_cand = min(cand_list, key=cost_fn)
-            best_edges.append((ci, cj, cost_fn(best_cand), best_cand))
-
-        best_edges.sort(key=lambda x: x[2])
+    def build_component_mst(active_bridge_segments, incident_node_bridges, used_pairs, used_comp_pairs, is_pass2=False):
+        current_bridge_segs = list(active_bridge_segments)
+        current_node_bridges = dict(incident_node_bridges)
         dsu = nx.utils.UnionFind()
         selected = []
-        for ci, cj, _, cand in best_edges:
-            if dsu[ci] != dsu[cj]:
-                dsu.union(ci, cj)
-                selected.append(cand)
-                if len(selected) == num_comp - 1:
-                    break
-        return selected
+
+        while len(selected) < num_comp - 1:
+            best_cand = None
+            best_cost = float("inf")
+            best_ci, best_cj = -1, -1
+
+            for (ci, cj), cand_list in candidate_bridges.items():
+                if dsu[ci] == dsu[cj]:
+                    continue
+
+                for cand in cand_list:
+                    u, v = cand["u"], cand["v"]
+                    pair_key = tuple(sorted((u, v)))
+
+                    pu = _node_additive_penalty(
+                        G, u, even_degree_penalty, odd_junction_penalty, corner_penalty, current_node_bridges.get(u, 0)
+                    )
+                    pv = _node_additive_penalty(
+                        G, v, even_degree_penalty, odd_junction_penalty, corner_penalty, current_node_bridges.get(v, 0)
+                    )
+                    node_factor = 1.0 + pu + pv
+
+                    bridge_crossings = count_edge_intersections(
+                        cand["pos_u"], cand["pos_v"], current_bridge_segs
+                    )
+                    total_crossings = cand["stroke_crossings"] + bridge_crossings
+                    cross_factor = 1.0 + intersection_penalty * total_crossings
+
+                    cost = cand["dist"] * node_factor * cross_factor
+
+                    if is_pass2:
+                        if pair_key in used_pairs:
+                            cost *= edge_reuse_penalty
+                        if (min(ci, cj), max(ci, cj)) in used_comp_pairs:
+                            cost *= comp_reuse_penalty
+
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_cand = cand
+                        best_ci, best_cj = ci, cj
+
+            if best_cand is None:
+                break
+
+            dsu.union(best_ci, best_cj)
+            selected.append(best_cand)
+            current_bridge_segs.append((best_cand["pos_u"], best_cand["pos_v"]))
+            current_node_bridges[best_cand["u"]] = current_node_bridges.get(best_cand["u"], 0) + 1
+            current_node_bridges[best_cand["v"]] = current_node_bridges.get(best_cand["v"], 0) + 1
+
+        return selected, current_node_bridges
 
     # Pass 1: Primary MST
-    mst1_bridges = build_component_mst(lambda c: c["base_cost"])
+    mst1_bridges, node_bridges_p1 = build_component_mst(
+        active_bridge_segments=[],
+        incident_node_bridges={},
+        used_pairs=set(),
+        used_comp_pairs=set(),
+        is_pass2=False,
+    )
     print(f"MST Pass 1 selected {len(mst1_bridges)} primary bridges.")
 
     used_pairs = {tuple(sorted((b["u"], b["v"]))) for b in mst1_bridges}
     used_comp_pairs = {(min(b["ci"], b["cj"]), max(b["ci"], b["cj"])) for b in mst1_bridges}
-    used_nodes = {n for b in mst1_bridges for n in (b["u"], b["v"])}
+    pass1_segments = [(b["pos_u"], b["pos_v"]) for b in mst1_bridges]
 
-    # Pass 2: Return MST (penalising duplicate bridges and reused nodes)
-    def pass2_cost(cand):
-        cost = cand["base_cost"]
-        if tuple(sorted((cand["u"], cand["v"]))) in used_pairs:
-            cost *= edge_reuse_penalty
-        if (min(cand["ci"], cand["cj"]), max(cand["ci"], cand["cj"])) in used_comp_pairs:
-            cost *= 1.35
-        if cand["u"] in used_nodes:
-            cost *= node_reuse_penalty
-        if cand["v"] in used_nodes:
-            cost *= node_reuse_penalty
-        return cost
-
-    mst2_bridges = build_component_mst(pass2_cost)
+    # Pass 2: Return MST
+    mst2_bridges, _ = build_component_mst(
+        active_bridge_segments=pass1_segments,
+        incident_node_bridges=node_bridges_p1,
+        used_pairs=used_pairs,
+        used_comp_pairs=used_comp_pairs,
+        is_pass2=True,
+    )
     print(f"MST Pass 2 selected {len(mst2_bridges)} candidate return bridges.")
 
     # Step 4: Exact T-Join Parity Pruning on Pass 2
-    # Keeps the minimal subset of Pass 2 bridges so every component has EVEN bridge degree (>= 2)
     comp_deg_1 = {c: 0 for c in range(num_comp)}
     for b in mst1_bridges:
         comp_deg_1[b["ci"]] += 1
@@ -340,21 +492,30 @@ def double_mst_bridging(
             kept_mst2.append(b)
         tree_2.add_edge(ci, cj)
 
-    final_bridges = mst1_bridges + kept_mst2
+    parity_bridges = mst1_bridges + kept_mst2
+
+    # Step 5: Redundancy Pruning
+    if prune_redundant:
+        final_bridges = _prune_redundant_bridges(parity_bridges, num_comp)
+        removed_redundant = len(parity_bridges) - len(final_bridges)
+        if removed_redundant > 0:
+            print(f"Pruned {removed_redundant} redundant excess bridge(s) from components with >= 4 bridges.")
+    else:
+        final_bridges = parity_bridges
 
     comp_degrees = {c: 0 for c in range(num_comp)}
     for b in final_bridges:
         comp_degrees[b["ci"]] += 1
         comp_degrees[b["cj"]] += 1
 
-    print(f"After parity pruning: {len(final_bridges)} total bridges retained.")
+    print(f"After parity & redundancy pruning: {len(final_bridges)} total bridges retained.")
     print(f"Bridge degrees per component (all even): {list(comp_degrees.values())}")
 
-    # Step 5: Inject bridges into the graph
+    # Step 6: Inject bridges into the graph
     bridged_G = G.copy()
     for b in final_bridges:
-        pos_u = bridged_G.nodes[b["u"]]["pos"]
-        pos_v = bridged_G.nodes[b["v"]]["pos"]
+        pos_u = np.asarray(bridged_G.nodes[b["u"]]["pos"], dtype=float)
+        pos_v = np.asarray(bridged_G.nodes[b["v"]]["pos"], dtype=float)
         bridged_G.add_edge(
             b["u"],
             b["v"],
@@ -376,7 +537,7 @@ def plot_bridged_graph(G, save_path="bridged_graph.png"):
     plt.figure(figsize=(9, 8))
 
     for u, v, k, data in G.edges(keys=True, data=True):
-        pts = data["pts"]
+        pts = np.asarray(data["pts"], dtype=float)
         if data.get("bridge", False):
             plt.plot(pts[:, 0], pts[:, 1], "c--", linewidth=2.2, label="MST Bridge", zorder=4)
         else:
