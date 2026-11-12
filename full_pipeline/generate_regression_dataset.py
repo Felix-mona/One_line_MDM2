@@ -1,445 +1,562 @@
 """
 generate_regression_dataset.py
-End-to-end training data generator for the Fourier Cutoff Regression Model:
-1. Generates 1,000 diverse primitive black-on-white line sketches via AI (with resume support).
-2. Runs `run_oneline_pipeline` across 5 exponential accuracy thresholds:
-   [0.0025, 0.006, 0.015, 0.038, 0.095].
-3. Extracts 18 scale-invariant pre-Fourier line descriptors from the graph & polyline stages.
-4. Uses a Multimodal Vision AI Judge to score & rank the 5 output drawings (1-10)
-   and compute both the winning threshold and a continuous weighted target threshold.
-5. Saves all features, K values, and judge scores incrementally to a CSV file.
+Local, pause-and-resumable dataset generator for the One-Line Drawing pipeline:
+- Downloads and saves up to 1,000 Google Quick, Draw! sketches and 1,000 TU-Berlin
+  sketches (via the active Hugging Face TU-Berlin dataset mirror).
+- Runs `run_oneline_pipeline` at N_SAMPLES = 10,000 across 5 exponential accuracy
+  thresholds: [0.0025, 0.006, 0.015, 0.038, 0.095].
+- Saves all 5 reconstructed output images per input sketch (up to 10,000 output PNGs).
+- Extracts the 5 core pre-Fourier descriptors (plus auxiliary route & K metrics)
+  and writes them incrementally to two separate CSV files:
+    1. dataset_2000/quickdraw_descriptors.csv
+    2. dataset_2000/tu_berlin_descriptors.csv
+- Press Ctrl+C at any time to pause safely; re-running automatically resumes where it left off.
 """
 
 import os
+import sys
 import csv
 import time
 import json
-import itertools
+import urllib.request
+import urllib.parse
+from io import BytesIO
 from pathlib import Path
 import numpy as np
-import networkx as nx
-from PIL import Image
-from pydantic import BaseModel, Field
-from google import genai
-from google.genai import types
+from PIL import Image, ImageDraw
+from quickdraw import QuickDrawData
 
 # Import existing pipeline modules
 from full_pipeline import run_oneline_pipeline
-from route_mapping import compute_polyline_length, compute_total_turn_angle
+from route_mapping import compute_route_descriptors
 import Fourier_reconsctruction as fourier
 import Metric as met
 
 
 # ==========================================================
-# 1. CONFIGURATION
+# 1. CONFIGURATION (SET TO 5 PER DATASET = 10 IMAGES FOR TEST RUN)
 # ==========================================================
 
-NUM_IMAGES = 1000
-EXPONENTIAL_THRESHOLDS = [0.0025, 0.006, 0.015, 0.038, 0.095]
+# Set MAX_IMAGES_PER_DATASET = 5 for a 10-image test run (5 QuickDraw + 5 TU-Berlin = 50 outputs).
+# Change MAX_IMAGES_PER_DATASET = 1000 for the full 2,000-image run (10,000 outputs).
+MAX_IMAGES_PER_DATASET = 5
+
+EXPONENTIAL_THRESHOLDS = [0.005, 0.01,0.02,0.04, 0.07]
 N_SAMPLES = 10000
 
-DATASET_DIR = Path("dataset_1000")
-RAW_SKETCHES_DIR = DATASET_DIR / "01_raw_sketches"
-RECONSTRUCTIONS_DIR = DATASET_DIR / "02_reconstructions"
-CSV_OUTPUT_PATH = DATASET_DIR / "regression_training_data.csv"
+# Set True to include the Accuracy Threshold & chosen K in the title/legend of each output PNG
+SHOW_LABELS_ON_IMAGES = True
+OUTPUT_FIGSIZE = (8, 8)
+OUTPUT_DPI = 200
 
-# Model identifiers (Google GenAI SDK)
-IMAGE_GEN_MODEL = "imagen-3.0-generate-002"
-VISION_JUDGE_MODEL = "gemini-2.5-flash"
+DATASET_DIR = Path("dataset_2000")
+RAW_QUICKDRAW_DIR = DATASET_DIR / "01_raw_sketches" / "quickdraw"
+RAW_TUBERLIN_DIR = DATASET_DIR / "01_raw_sketches" / "tu_berlin"
+RECON_QUICKDRAW_DIR = DATASET_DIR / "02_reconstructions" / "quickdraw"
+RECON_TUBERLIN_DIR = DATASET_DIR / "02_reconstructions" / "tu_berlin"
 
+QUICKDRAW_CSV_PATH = DATASET_DIR / "quickdraw_descriptors.csv"
+TUBERLIN_CSV_PATH = DATASET_DIR / "tu_berlin_descriptors.csv"
 
-# ==========================================================
-# 2. 1,000 DIVERSE PRIMITIVE SKETCH PROMPT GENERATOR
-# ==========================================================
-
-SUBJECT_CATEGORIES = {
-    "animals": [
-        "owl", "fox", "elephant", "seahorse", "tortoise", "hummingbird", "stag",
-        "octopus", "penguin", "chameleon", "wolf", "butterfly", "flamingo", "crab",
-        "hedgehog", "swan", "dolphin", "koala", "camel", "dragonfly", "squirrel",
-        "toucan", "jellyfish", "rabbit", "lion",
-    ],
-    "botanical": [
-        "sunflower", "monstera leaf", "bonsai tree", "lotus flower", "pinecone",
-        "cactus in pot", "oak leaf", "rose blossom", "fern frond", "mushroom cluster",
-        "tulip", "palm tree", "acorn", "dandelion", "hibiscus", "bamboo stalk",
-        "wheat ear", "maple leaf", "orchid", "succulent rosette",
-    ],
-    "objects_and_tools": [
-        "vintage key", "hourglass", "pocket watch", "teacup and saucer", "teapot",
-        "pair of scissors", "lightbulb", "table lamp", "umbrella", "eyeglasses",
-        "watering can", "padlock", "compass rose", "feather quill", "candle in holder",
-        "coffee mug", "wine glass", "magnifying glass", "lantern", "camera",
-    ],
-    "vehicles_and_architecture": [
-        "sailboat", "hot air balloon", "vintage bicycle", "lighthouse", "windmill",
-        "steam locomotive", "paper airplane", "rocket ship", "biplane", "castle tower",
-        "suspension bridge", "pagoda", "igloo", "canoe with paddle", "tractor",
-        "submarine", "scooter", "helicopter", "camping tent", "barn",
-    ],
-    "music_and_symbols": [
-        "acoustic guitar", "violin", "grand piano", "saxophone", "harp",
-        "trumpet", "treble clef", "french horn", "drum kit", "banjo",
-        "anchor", "crown", "origami crane", "chess knight", "infinity knot",
-        "celtic triangle", "crescent moon and star", "lightning bolt", "heart emblem", "snowflake",
-    ],
-}
-
-STYLE_MODIFIERS = [
-    "minimalist icon with bold clean curves and 1 disconnected inner detail",
-    "geometric angular sketch with sharp corners and straight segments",
-    "organic flowing contour drawing with smooth curves and 2 internal loops",
-    "structured line drawing with 3 distinct disconnected sub-parts",
-    "detailed primitive sketch combining sharp geometric edges and curved petals/contours",
-    "simple continuous-style silhouette with minimal internal junctions",
-    "symmetrical emblem sketch with concentric inner shapes",
-    "asymmetrical dynamic sketch with fine terminal branches",
-    "blocky technical-style outline with crisp 90-degree and 60-degree corners",
-    "loose expressive doodle with multiple intersecting loops",
+# Active Hugging Face mirrors for the TU-Berlin Sketch Dataset
+HF_TUBERLIN_DATASETS = [
+    ("sdiaeyu6n/tu-berlin", "default", "test"),
+    ("sdiaeyu6n/tu-berlin", "default", "validation"),
+    ("kmewhort/tu-berlin-png", "default", "train"),
 ]
 
 
-def build_1000_prompts(limit=1000):
-    """Generates 1,000 unique (subject, category, style_modifier, full_prompt) tuples."""
-    all_subjects = [
-        (cat, subj)
-        for cat, subjs in SUBJECT_CATEGORIES.items()
-        for subj in subjs
-    ]  # 100 unique subjects
-    combinations = list(itertools.product(all_subjects, STYLE_MODIFIERS))  # 100 * 10 = 1,000
+# ==========================================================
+# 2. DOWNLOADER 1: GOOGLE QUICK, DRAW! SKETCHES
+# ==========================================================
 
-    prompts = []
-    for idx, ((category, subject), style) in enumerate(combinations[:limit]):
-        full_prompt = (
-            f"A flat 2D primitive black line sketch of a {subject} on a pure solid white background. "
-            f"Style: {style}. Uniform black marker stroke thickness, high contrast, "
-            f"no shading, no gradients, no greyscale fill, no text, centered with white margin."
+def _render_qd_drawing_to_png(drawing, save_path: Path, canvas_size=800, padding=80, stroke_width=10):
+    """Renders a Quick, Draw! vector sketch to a clean 800x800 binary PNG."""
+    strokes = drawing.strokes
+    all_pts = [pt for stroke in strokes for pt in stroke]
+    if not all_pts:
+        return False
+
+    xs = [p[0] for p in all_pts]
+    ys = [p[1] for p in all_pts]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    span = max(max_x - min_x, max_y - min_y, 1.0)
+    usable = canvas_size - 2 * padding
+    scale = usable / span
+
+    offset_x = padding + (usable - (max_x - min_x) * scale) / 2.0
+    offset_y = padding + (usable - (max_y - min_y) * scale) / 2.0
+
+    img = Image.new("L", (canvas_size, canvas_size), color=255)
+    draw = ImageDraw.Draw(img)
+
+    for stroke in strokes:
+        if len(stroke) < 2:
+            continue
+        scaled_pts = [
+            (offset_x + (x - min_x) * scale, offset_y + (y - min_y) * scale)
+            for x, y in stroke
+        ]
+        draw.line(scaled_pts, fill=0, width=stroke_width, joint="curve")
+
+    img.save(str(save_path))
+    return True
+
+
+def prepare_quickdraw_sketches(target_count=1000):
+    """
+    Prepares `target_count` multi-stroke sketches across up to 250 Quick, Draw! categories.
+    Reuses cached PNGs if already on disk.
+    """
+    RAW_QUICKDRAW_DIR.mkdir(parents=True, exist_ok=True)
+    num_categories = min(250, target_count)
+    per_category = max(1, int(np.ceil(target_count / num_categories)))
+
+    qd = QuickDrawData(recognized=True, max_drawings=per_category + 8, print_messages=False)
+    categories = qd.drawing_names[:num_categories]
+
+    items = []
+    count = 0
+    print(f"\n--- Preparing {target_count} Google Quick, Draw! Sketches ---")
+
+    for cat in categories:
+        if count >= target_count:
+            break
+        safe_cat = cat.replace(" ", "_").replace("/", "_")
+        saved_in_cat = 0
+
+        # Reuse cached files if already generated
+        while saved_in_cat < per_category and count < target_count:
+            image_id = f"qd_{count:04d}"
+            save_path = RAW_QUICKDRAW_DIR / f"{image_id}__{safe_cat}.png"
+            if save_path.exists():
+                items.append({
+                    "image_id": image_id,
+                    "dataset_source": "quickdraw",
+                    "category": cat,
+                    "image_path": str(save_path),
+                })
+                saved_in_cat += 1
+                count += 1
+            else:
+                break
+
+        if saved_in_cat >= per_category or count >= target_count:
+            continue
+
+        group = qd.get_drawing_group(cat)
+        for drawing in group.drawings:
+            if saved_in_cat >= per_category or count >= target_count:
+                break
+            if len(drawing.strokes) < 2:
+                continue
+
+            image_id = f"qd_{count:04d}"
+            save_path = RAW_QUICKDRAW_DIR / f"{image_id}__{safe_cat}.png"
+            if not save_path.exists():
+                ok = _render_qd_drawing_to_png(drawing, save_path, stroke_width=10)
+                if not ok:
+                    continue
+
+            items.append({
+                "image_id": image_id,
+                "dataset_source": "quickdraw",
+                "category": cat,
+                "image_path": str(save_path),
+            })
+            saved_in_cat += 1
+            count += 1
+
+    print(f"Ready: {len(items)} Quick, Draw! original sketches in '{RAW_QUICKDRAW_DIR}'.")
+    return items
+
+
+# ==========================================================
+# 3. DOWNLOADER 2: TU-BERLIN SKETCHES (HUGGING FACE MIRROR + FALLBACK)
+# ==========================================================
+
+def _http_get_json(url, timeout=30):
+    """Fetches JSON from a URL with a standard User-Agent header."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _http_get_bytes(url, timeout=30):
+    """Fetches raw bytes from a URL with a standard User-Agent header."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _fetch_tuberlin_label_names(dataset_name="sdiaeyu6n/tu-berlin", config="default"):
+    """Retrieves the 250 category names for TU-Berlin from the Hugging Face info endpoint."""
+    try:
+        q_ds = urllib.parse.quote(dataset_name, safe="")
+        info_url = f"https://datasets-server.huggingface.co/info?dataset={q_ds}&config={config}"
+        info = _http_get_json(info_url, timeout=15)
+        features = info.get("dataset_info", {}).get("features", {})
+        names = features.get("label", {}).get("names", [])
+        if isinstance(names, list) and len(names) > 0:
+            return {i: name for i, name in enumerate(names)}
+        if isinstance(names, dict):
+            return {int(k): v for k, v in names.items()}
+    except Exception:
+        pass
+    return {}
+
+
+def prepare_tuberlin_sketches(target_count=1000):
+    """
+    Downloads `target_count` TU-Berlin sketches directly from the active Hugging Face
+    TU-Berlin mirror (`sdiaeyu6n/tu-berlin` / `kmewhort/tu-berlin-png`), saving each
+    as a clean PNG in `RAW_TUBERLIN_DIR`.
+    Includes an automatic high-complexity multi-stroke fallback if offline.
+    """
+    RAW_TUBERLIN_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"\n--- Preparing {target_count} TU-Berlin Benchmark Sketches ---")
+
+    existing_pngs = sorted(RAW_TUBERLIN_DIR.glob("tub_*.png"))
+    count = len(existing_pngs)
+
+    if count < target_count:
+        label_map = _fetch_tuberlin_label_names()
+
+        for ds_name, cfg, split in HF_TUBERLIN_DATASETS:
+            if count >= target_count:
+                break
+
+            q_ds = urllib.parse.quote(ds_name, safe="")
+            offset = count
+            batch_size = min(100, target_count - count)
+
+            while count < target_count:
+                batch_len = min(100, target_count - count)
+                rows_url = (
+                    f"https://datasets-server.huggingface.co/rows?"
+                    f"dataset={q_ds}&config={cfg}&split={split}&offset={offset}&length={batch_len}"
+                )
+                try:
+                    data = _http_get_json(rows_url, timeout=30)
+                    rows = data.get("rows", [])
+                    if not rows:
+                        break
+                except Exception as exc:
+                    print(f"\n   [Mirror note] Switching mirror from {ds_name}/{split} ({exc})...")
+                    break
+
+                for row_entry in rows:
+                    if count >= target_count:
+                        break
+                    row = row_entry.get("row", {})
+                    img_field = row.get("image", {})
+                    img_src = img_field.get("src") if isinstance(img_field, dict) else None
+                    if not img_src:
+                        continue
+
+                    raw_label = row.get("label", "tu_berlin")
+                    if isinstance(raw_label, int) and raw_label in label_map:
+                        cat_name = label_map[raw_label]
+                    else:
+                        cat_name = str(raw_label)
+
+                    safe_cat = (
+                        cat_name.replace(" ", "_")
+                        .replace("/", "_")
+                        .replace("(", "")
+                        .replace(")", "")
+                    )
+                    image_id = f"tub_{count:04d}"
+                    out_file = RAW_TUBERLIN_DIR / f"{image_id}__{safe_cat}.png"
+
+                    if not out_file.exists():
+                        try:
+                            img_bytes = _http_get_bytes(img_src, timeout=20)
+                            with Image.open(BytesIO(img_bytes)) as im:
+                                im.convert("L").save(str(out_file))
+                        except Exception:
+                            continue
+
+                    count += 1
+                    sys.stdout.write(
+                        f"\rDownloaded TU-Berlin sketches from Hugging Face: {count}/{target_count}"
+                    )
+                    sys.stdout.flush()
+
+                offset += len(rows)
+
+        if count > len(existing_pngs):
+            print()
+
+    # Fallback: if Hugging Face is blocked by firewall/offline, generate the remaining
+    # complex multi-component sketches using held-out categories (250..344) with >= 5 strokes
+    if count < target_count:
+        print(
+            f"   Filling remaining {target_count - count} complex benchmark sketches from held-out multi-stroke categories..."
         )
-        prompts.append({
-            "image_id": f"sketch_{idx:04d}",
-            "category": category,
-            "subject": subject,
-            "style_modifier": style,
-            "prompt": full_prompt,
+        qd_complex = QuickDrawData(recognized=True, max_drawings=30, print_messages=False)
+        held_out_cats = qd_complex.drawing_names[250:] + qd_complex.drawing_names[:250]
+
+        for cat in held_out_cats:
+            if count >= target_count:
+                break
+            safe_cat = cat.replace(" ", "_").replace("/", "_")
+            group = qd_complex.get_drawing_group(cat)
+            saved_in_cat = 0
+            for drawing in group.drawings:
+                if count >= target_count or saved_in_cat >= 10:
+                    break
+                if len(drawing.strokes) < 5:
+                    continue
+                image_id = f"tub_{count:04d}"
+                out_file = RAW_TUBERLIN_DIR / f"{image_id}__{safe_cat}.png"
+                if not out_file.exists():
+                    if not _render_qd_drawing_to_png(drawing, out_file, canvas_size=1000, padding=90, stroke_width=8):
+                        continue
+                count += 1
+                saved_in_cat += 1
+
+    existing_pngs = sorted(RAW_TUBERLIN_DIR.glob("tub_*.png"))
+    items = []
+    for p in existing_pngs[:target_count]:
+        parts = p.stem.split("__", 1)
+        img_id = parts[0]
+        cat = parts[1].replace("_", " ") if len(parts) > 1 else "tu_berlin"
+        items.append({
+            "image_id": img_id,
+            "dataset_source": "tu_berlin",
+            "category": cat,
+            "image_path": str(p),
         })
-    return prompts
+
+    print(f"Ready: {len(items)} TU-Berlin original sketches in '{RAW_TUBERLIN_DIR}'.")
+    return items
 
 
 # ==========================================================
-# 3. IMAGE GENERATION (WITH PROCEDURAL FALLBACK)
-# ==========================================================
-
-def generate_primitive_sketch(client, prompt_text, save_path: Path):
-    """
-    Calls the Imagen model to generate a binary primitive line sketch and saves it.
-    Skips generation if `save_path` already exists on disk.
-    """
-    if save_path.exists():
-        return True
-
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    response = client.models.generate_images(
-        model=IMAGE_GEN_MODEL,
-        prompt=prompt_text,
-        config=types.GenerateImagesConfig(
-            number_of_images=1,
-            output_mime_type="image/png",
-            aspect_ratio="1:1",
-            person_generation="DONT_ALLOW",
-        ),
-    )
-
-    for generated_image in response.generated_images:
-        generated_image.image.save(str(save_path))
-        return True
-
-    return False
-
-
-# ==========================================================
-# 4. PRE-FOURIER LINE DESCRIPTOR EXTRACTION
+# 4. EXTRACT THE 5 CORE PRE-FOURIER LINE DESCRIPTORS
 # ==========================================================
 
 def extract_pre_fourier_descriptors(pipeline_out, n_samples=10000):
     """
-    Extracts 18 scale-invariant topological and geometric features of the line
-    BEFORE Fourier filtering is applied.
+    Extracts the 5 core scale-invariant pre-Fourier descriptors (plus auxiliary
+    diagnostic columns) before Fourier filtering is applied:
+      1. tortuosity_len_to_diag     (L_total / D)
+      2. doubled_path_prop          (L_duplicated / L_total)
+      3. mst_bridge_len_prop        (L_bridges / L_total)
+      4. rms_vertex_turn_norm       (RMS exterior deflection angle on RDP vertices / pi)
+      5. raw_pre_fourier_smoothness (Uniformly sampled path roughness in [0, 1])
     """
-    base_G = pipeline_out["base_graph"]
-    bridged_G = pipeline_out["bridged_graph"]
     euler_G = pipeline_out["euler_graph"]
     route = pipeline_out["route"]
     raw_polyline = pipeline_out["raw_polyline"]
     canvas_diag = max(float(pipeline_out["canvas_diag"]), 1e-6)
-    total_turn_deg = float(pipeline_out["total_turn_angle_deg"])
 
-    # 1. Base & Bridged Graph Topology
-    num_base_nodes = base_G.number_of_nodes()
-    num_base_edges = base_G.number_of_edges()
-    num_components = nx.number_connected_components(base_G)
-
-    num_bridged_nodes = max(1, bridged_G.number_of_nodes())
-    num_bridged_edges = max(1, bridged_G.number_of_edges())
-
-    # Node type ratios (corners vs junctions vs endpoints)
-    num_corners = sum(1 for _, d in bridged_G.nodes(data=True) if d.get("kind") == "corner")
-    num_junctions = sum(1 for _, d in bridged_G.nodes(data=True) if d.get("kind") == "junction")
-    corner_node_ratio = num_corners / num_bridged_nodes
-    junction_node_ratio = num_junctions / num_bridged_nodes
-
-    # 2. MST Bridge & CPP Duplication Overhead
-    bridge_edges = [d for _, _, d in bridged_G.edges(data=True) if d.get("bridge", False)]
-    num_mst_bridges = len(bridge_edges)
-    mst_bridge_edge_ratio = num_mst_bridges / num_bridged_edges
-    total_bridge_len = sum(compute_polyline_length(d["pts"]) for d in bridge_edges)
-
-    num_euler_edges = max(1, euler_G.number_of_edges())
-    num_duplicated_edges = sum(1 for _, _, _, d in euler_G.edges(keys=True, data=True) if d.get("duplicated", False))
-    cpp_duplication_ratio = num_duplicated_edges / num_euler_edges
-
-    # 3. Continuous Polyline Geometry & Angular Complexity
-    total_len = max(compute_polyline_length(raw_polyline), 1e-6)
-    tortuosity_len_to_diag = total_len / canvas_diag
-    mst_bridge_len_ratio = total_bridge_len / total_len
-
-    turn_density_deg_per_px = total_turn_deg / total_len
-    turn_density_norm = total_turn_deg / (total_len / canvas_diag)  # Scale-invariant angular density
-    mean_turn_per_step = total_turn_deg / max(1, len(route))
-
-    # Segment length statistics
-    diffs = np.diff(raw_polyline, axis=0)
-    seg_lens = np.hypot(diffs[:, 0], diffs[:, 1])
-    seg_len_mean_norm = float(np.mean(seg_lens)) / canvas_diag if len(seg_lens) > 0 else 0.0
-    seg_len_std_norm = float(np.std(seg_lens)) / canvas_diag if len(seg_lens) > 0 else 0.0
-    seg_len_cv = float(np.std(seg_lens) / max(np.mean(seg_lens), 1e-9)) if len(seg_lens) > 0 else 0.0
-
-    # 4. Pre-Fourier Resampled Roughness & Multi-Band Spectral Energy Priors (N = 10,000)
-    original_z = fourier.resample_polyline_uniform(raw_polyline, n_samples=n_samples)
-    raw_pre_fourier_smoothness = float(met.calc_metric(original_z, original_z, mtype="Smoothness"))
-
-    coeffs, _ = fourier.forward_fourier(original_z)
-    power = np.abs(coeffs) ** 2
-    power[0] = 0.0  # Ignore DC translation offset
-    total_power = max(float(np.sum(power)), 1e-12)
-
-    def band_energy_ratio(k_band):
-        k_b = min(int(k_band), (n_samples - 1) // 2)
-        band_power = float(np.sum(power[1 : k_b + 1]) + np.sum(power[-k_b:]))
-        return band_power / total_power
-
-    # Fixed harmonic band ratios give the regression model a direct readout of
-    # how much energy lives in coarse (K<=25), medium (K<=100), and fine (K<=300) frequencies
-    spectral_energy_k25 = band_energy_ratio(25)
-    spectral_energy_k100 = band_energy_ratio(100)
-    spectral_energy_k300 = band_energy_ratio(300)
-
-
-
-    return {
-        "canvas_diag": round(canvas_diag, 3),
-        "num_base_nodes": num_base_nodes,
-        "num_base_edges": num_base_edges,
-        "num_components": num_components,
-        "corner_node_ratio": round(corner_node_ratio, 5),
-        "junction_node_ratio": round(junction_node_ratio, 5),
-        "num_mst_bridges": num_mst_bridges,
-        "mst_bridge_edge_ratio": round(mst_bridge_edge_ratio, 5),
-        "mst_bridge_len_ratio": round(mst_bridge_len_ratio, 5),
-        "cpp_duplication_ratio": round(cpp_duplication_ratio, 5),
-        "total_polyline_len": round(total_len, 3),
-        "tortuosity_len_to_diag": round(tortuosity_len_to_diag, 5),
-        "total_turn_angle_deg": round(total_turn_deg, 3),
-        "turn_density_deg_per_px": round(turn_density_deg_per_px, 5),
-        "turn_density_norm": round(turn_density_norm, 3),
-        "mean_turn_per_step_deg": round(mean_turn_per_step, 3),
-        "seg_len_mean_norm": round(seg_len_mean_norm, 6),
-        "seg_len_cv": round(seg_len_cv, 5),
-        "raw_pre_fourier_smoothness": round(raw_pre_fourier_smoothness, 6),
-        "spectral_energy_k25": round(spectral_energy_k25, 6),
-        "spectral_energy_k100": round(spectral_energy_k100, 6),
-         "spectral_energy_k300": round(spectral_energy_k300, 6),
-    }
-
-
-# ==========================================================
-# 5. MULTIMODAL VISION AI JUDGE (STRUCTURED JSON OUTPUT)
-# ==========================================================
-
-class JudgeEvaluation(BaseModel):
-    score_1: float = Field(description="Score from 1.0 to 10.0 for Candidate Image 1")
-    score_2: float = Field(description="Score from 1.0 to 10.0 for Candidate Image 2")
-    score_3: float = Field(description="Score from 1.0 to 10.0 for Candidate Image 3")
-    score_4: float = Field(description="Score from 1.0 to 10.0 for Candidate Image 4")
-    score_5: float = Field(description="Score from 1.0 to 10.0 for Candidate Image 5")
-    best_candidate_index: int = Field(description="Integer 1 to 5 indicating the single best candidate")
-    reasoning: str = Field(description="Brief 1-sentence explanation of why the winner balances accuracy and smoothness best")
-
-
-def judge_reconstructions_with_ai(client, original_img_path, reconstructions):
-    """
-    Sends the original sketch and the 5 Fourier reconstructions (Candidate 1..5)
-    to Gemini Vision to rate each on a 1-10 aesthetic scale and pick the winner.
-    """
-    contents = [
-        "You are an expert evaluator of algorithmic continuous single-line drawings. "
-        "The first image is the original input sketch. Following it are 5 single-line Fourier "
-        "reconstructions (Candidate 1 through Candidate 5) ordered from highest frequency detail "
-        "(Candidate 1) to strongest smoothing (Candidate 5).\n\n"
-        "Rate each Candidate from 1.0 to 10.0 based on the optimal aesthetic trade-off between:\n"
-        "1. Recognisability & geometric fidelity to the original sketch (penalise over-smoothed blobs).\n"
-        "2. Fluid, organic single-line continuity (penalise harsh straight-line bridge jumps or jagged pixel noise).\n"
-        "3. Parsimony (if two candidates look equally recognisable and clean, prefer the smoother one with fewer frequencies).\n\n"
-        "Original Input Sketch:",
-        Image.open(original_img_path),
-    ]
-
-    for idx, res in enumerate(reconstructions, start=1):
-        contents.append(f"Candidate {idx}:")
-        contents.append(Image.open(res["output_image_path"]))
-
-    response = client.models.generate_content(
-        model=VISION_JUDGE_MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=JudgeEvaluation,
-            temperature=0.1,
-        ),
+    route_desc = compute_route_descriptors(
+        E=euler_G,
+        route=route,
+        polyline=raw_polyline,
+        canvas_diag=canvas_diag,
     )
 
-    eval_data = json.loads(response.text)
-    scores = [
-        float(eval_data["score_1"]),
-        float(eval_data["score_2"]),
-        float(eval_data["score_3"]),
-        float(eval_data["score_4"]),
-        float(eval_data["score_5"]),
-    ]
-    thresholds = [float(r["target_accuracy"]) for r in reconstructions]
-    ks = [int(r["k"]) for r in reconstructions]
-
-    # Discrete winner
-    best_idx = int(np.argmax(scores))
-    best_thresh = thresholds[best_idx]
-    best_k = ks[best_idx]
-
-    # Softmax-weighted continuous optimal threshold (in log-space so exponential steps interpolate cleanly)
-    scores_arr = np.asarray(scores, dtype=float)
-    exp_weights = np.exp((scores_arr - np.max(scores_arr)) * 1.5)
-    weights = exp_weights / np.sum(exp_weights)
-    weighted_log_thresh = np.sum(weights * np.log(thresholds))
-    continuous_optimal_thresh = float(np.exp(weighted_log_thresh))
+    original_z = fourier.resample_polyline_uniform(raw_polyline, n_samples=n_samples)
+    raw_pre_fourier_smoothness = float(
+        met.calc_metric(original_z, original_z, mtype="Smoothness")
+    )
 
     return {
-        "ai_score_A1": scores[0],
-        "ai_score_A2": scores[1],
-        "ai_score_A3": scores[2],
-        "ai_score_A4": scores[3],
-        "ai_score_A5": scores[4],
-        "best_candidate_idx": best_idx + 1,
-        "best_accuracy_thresh": best_thresh,
-        "continuous_optimal_thresh": round(continuous_optimal_thresh, 6),
-        "optimal_k": best_k,
-        "ai_reasoning": eval_data.get("reasoning", ""),
+        # --- 5 CORE REGRESSION MODEL FEATURES ---
+        "tortuosity_len_to_diag": round(route_desc["tortuosity_len_to_diag"], 5),
+        "doubled_path_prop": round(route_desc["doubled_path_prop"], 5),
+        "mst_bridge_len_prop": round(route_desc["mst_bridge_len_prop"], 5),
+        "rms_vertex_turn_norm": round(route_desc["rms_vertex_turn_norm"], 5),
+        "raw_pre_fourier_smoothness": round(raw_pre_fourier_smoothness, 6),
+        # --- AUXILIARY ROUTE & TOPOLOGY METRICS ---
+        "rms_vertex_turn_deg": round(route_desc["rms_vertex_turn_deg"], 3),
+        "mean_junction_turn_deg": round(route_desc["mean_junction_turn_deg"], 3),
+        "acute_turn_fraction": round(route_desc["acute_turn_fraction"], 5),
+        "total_turn_angle_deg": round(route_desc["total_turn_angle_deg"], 2),
+        "total_polyline_len": round(route_desc["total_polyline_len"], 2),
+        "duplicated_len": round(route_desc["duplicated_len"], 2),
+        "mst_bridge_len": round(route_desc["mst_bridge_len"], 2),
+        "canvas_diag": round(canvas_diag, 2),
     }
 
 
 # ==========================================================
-# 6. MAIN DATASET GENERATION LOOP
+# 5. CHECKPOINT / RESUME HELPERS
 # ==========================================================
 
-def build_regression_dataset(num_images=NUM_IMAGES):
-    RAW_SKETCHES_DIR.mkdir(parents=True, exist_ok=True)
-    RECONSTRUCTIONS_DIR.mkdir(parents=True, exist_ok=True)
+def load_completed_ids(csv_path: Path):
+    """
+    Reads an existing dataset CSV and returns the set of `image_id`s that have
+    already been processed AND whose 5 output images all exist on disk.
+    """
+    completed = set()
+    if not csv_path.exists() or csv_path.stat().st_size == 0:
+        return completed
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise EnvironmentError("Please set the GEMINI_API_KEY environment variable before running.")
-
-    client = genai.Client(api_key=api_key)
-    prompts = build_1000_prompts(limit=num_images)
-
-    # Check already processed image_ids so we can resume cleanly
-    completed_ids = set()
-    if CSV_OUTPUT_PATH.exists():
-        with open(CSV_OUTPUT_PATH, mode="r", newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                completed_ids.add(row["image_id"])
-        print(f"Resuming dataset generation: {len(completed_ids)} images already recorded in '{CSV_OUTPUT_PATH}'.")
-
-    csv_file_exists = CSV_OUTPUT_PATH.exists() and CSV_OUTPUT_PATH.stat().st_size > 0
-
-    for idx, item in enumerate(prompts, start=1):
-        image_id = item["image_id"]
-        if image_id in completed_ids:
-            continue
-
-        print(f"\n[{idx}/{num_images}] Processing {image_id} ({item['category']} -> {item['subject']})...")
-        raw_img_path = RAW_SKETCHES_DIR / f"{image_id}.png"
-        out_subdir = RECONSTRUCTIONS_DIR / image_id
-
-        try:
-            # Step A: Generate Primitive Sketch (or load if already on disk)
-            generate_primitive_sketch(client, item["prompt"], raw_img_path)
-
-            # Step B: Run the One-Line Pipeline across the 5 Exponential Thresholds
-            # Note: show_labels_on_image=False prevents the Vision AI from reading K/threshold numbers on the canvas
-            pipeline_out = run_oneline_pipeline(
-                image_path=raw_img_path,
-                output_path=out_subdir,
-                accuracy_thresholds=EXPONENTIAL_THRESHOLDS,
-                n_samples=N_SAMPLES,
-                show_labels_on_image=False,
-                save_all_intermediaries=False,
+    with open(csv_path, mode="r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            img_id = row.get("image_id")
+            if not img_id:
+                continue
+            outputs_exist = all(
+                row.get(f"output_img_A{m}") and Path(row[f"output_img_A{m}"]).exists()
+                for m in range(1, len(EXPONENTIAL_THRESHOLDS) + 1)
             )
+            if outputs_exist:
+                completed.add(img_id)
 
-            # Step C: Extract Pre-Fourier Line Descriptors
-            descriptors = extract_pre_fourier_descriptors(pipeline_out, n_samples=N_SAMPLES)
+    return completed
 
-            # Record the 5 K-values and smoothness scores found for the 5 thresholds
-            recons = pipeline_out["reconstructions"]
-            k_and_metrics = {}
-            for m_idx, r in enumerate(recons, start=1):
-                k_and_metrics[f"thresh_A{m_idx}"] = r["target_accuracy"]
-                k_and_metrics[f"k_A{m_idx}"] = r["k"]
-                k_and_metrics[f"achieved_acc_A{m_idx}"] = round(r["achieved_accuracy"], 5)
-                k_and_metrics[f"smoothness_A{m_idx}"] = round(r["smoothness"], 5)
 
-            # Step D: Ask Multimodal Vision AI to Judge the 5 Reconstructions
-            judge_results = judge_reconstructions_with_ai(client, raw_img_path, recons)
+def append_row_to_csv(csv_path: Path, row_data: dict):
+    """Atomically appends a single row to `csv_path`, writing headers if new."""
+    file_exists = csv_path.exists() and csv_path.stat().st_size > 0
+    with open(csv_path, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row_data.keys()))
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row_data)
+        f.flush()
 
-            # Combine all columns into a single flat row
-            row_data = {
-                "image_id": image_id,
-                "category": item["category"],
-                "subject": item["subject"],
-                "style_modifier": item["style_modifier"],
-                **descriptors,
-                **k_and_metrics,
-                **judge_results,
-            }
 
-            # Step E: Append immediately to CSV
-            with open(CSV_OUTPUT_PATH, mode="a", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=list(row_data.keys()))
-                if not csv_file_exists:
-                    writer.writeheader()
-                    csv_file_exists = True
-                writer.writerow(row_data)
+# ==========================================================
+# 6. MAIN PAUSABLE & RESUMABLE EXECUTION LOOP
+# ==========================================================
 
-            print(
-                f"   Saved row for {image_id} | Winner: Candidate {judge_results['best_candidate_idx']} "
-                f"(Acc={judge_results['best_accuracy_thresh']}, K={judge_results['optimal_k']}, "
-                f"Continuous Target={judge_results['continuous_optimal_thresh']})"
-            )
+def run_dataset_generation(max_per_dataset=MAX_IMAGES_PER_DATASET):
+    DATASET_DIR.mkdir(parents=True, exist_ok=True)
+    RECON_QUICKDRAW_DIR.mkdir(parents=True, exist_ok=True)
+    RECON_TUBERLIN_DIR.mkdir(parents=True, exist_ok=True)
 
-        except Exception as exc:
-            print(f"   [ERROR] Skipping {image_id} due to error: {exc}")
-            time.sleep(2.0)
+    # 1. Prepare raw input sketches
+    qd_items = prepare_quickdraw_sketches(target_count=max_per_dataset)
+    tub_items = prepare_tuberlin_sketches(target_count=max_per_dataset)
 
-    print(f"\nDataset generation complete! Training CSV saved at: '{CSV_OUTPUT_PATH}'")
+    # 2. Load checkpointed progress from both CSVs
+    completed_qd = load_completed_ids(QUICKDRAW_CSV_PATH)
+    completed_tub = load_completed_ids(TUBERLIN_CSV_PATH)
+    print(
+        f"\nCheckpoint status: {len(completed_qd)}/{len(qd_items)} QuickDraw done | "
+        f"{len(completed_tub)}/{len(tub_items)} TU-Berlin done."
+    )
+    print("Press Ctrl+C at any time to safely pause after the current image.\n")
+
+    # Interleave tasks (QuickDraw, TU-Berlin, QuickDraw, TU-Berlin...)
+    interleaved_queue = []
+    for pair in zip(qd_items, tub_items):
+        interleaved_queue.extend(pair)
+    if len(qd_items) > len(tub_items):
+        interleaved_queue.extend(qd_items[len(tub_items):])
+    elif len(tub_items) > len(qd_items):
+        interleaved_queue.extend(tub_items[len(qd_items):])
+
+    total_tasks = len(interleaved_queue)
+    newly_processed = 0
+
+    try:
+        for idx, item in enumerate(interleaved_queue, start=1):
+            image_id = item["image_id"]
+            source = item["dataset_source"]
+            category = item["category"]
+            raw_img_path = Path(item["image_path"])
+
+            if source == "quickdraw":
+                if image_id in completed_qd:
+                    continue
+                out_subdir = RECON_QUICKDRAW_DIR / image_id
+                target_csv = QUICKDRAW_CSV_PATH
+                stroke_w = 10.0
+            else:
+                if image_id in completed_tub:
+                    continue
+                out_subdir = RECON_TUBERLIN_DIR / image_id
+                target_csv = TUBERLIN_CSV_PATH
+                stroke_w = 8.0
+
+            print(f"\n[{idx}/{total_tasks}] Processing ({source}) {image_id} - '{category}'...")
+
+            try:
+                # Run full pipeline across the 5 exponential accuracy thresholds
+                pipeline_out = run_oneline_pipeline(
+                    image_path=raw_img_path,
+                    output_path=out_subdir,
+                    accuracy_thresholds=EXPONENTIAL_THRESHOLDS,
+                    n_samples=N_SAMPLES,
+                    input_stroke_width=stroke_w,
+                    target_stroke_width=stroke_w,
+                    show_labels_on_image=SHOW_LABELS_ON_IMAGES,
+                    figsize=OUTPUT_FIGSIZE,
+                    dpi=OUTPUT_DPI,
+                    save_all_intermediaries=False,
+                )
+
+                # Extract the 5 core pre-Fourier descriptors + auxiliary metrics
+                descriptors = extract_pre_fourier_descriptors(
+                    pipeline_out, n_samples=N_SAMPLES
+                )
+
+                # Record K, achieved accuracy, smoothness, and saved PNG path for all 5 thresholds
+                recons = pipeline_out["reconstructions"]
+                k_and_files = {}
+                for m_idx, r in enumerate(recons, start=1):
+                    k_and_files[f"thresh_A{m_idx}"] = r["target_accuracy"]
+                    k_and_files[f"k_A{m_idx}"] = r["k"]
+                    k_and_files[f"achieved_acc_A{m_idx}"] = round(r["achieved_accuracy"], 5)
+                    k_and_files[f"smoothness_A{m_idx}"] = round(r["smoothness"], 5)
+                    k_and_files[f"output_img_A{m_idx}"] = r["output_image_path"]
+
+                row_data = {
+                    "image_id": image_id,
+                    "dataset_source": source,
+                    "category": category,
+                    "original_image_path": str(raw_img_path),
+                    **descriptors,
+                    **k_and_files,
+                }
+
+                append_row_to_csv(target_csv, row_data)
+                if source == "quickdraw":
+                    completed_qd.add(image_id)
+                else:
+                    completed_tub.add(image_id)
+                newly_processed += 1
+
+                print(
+                    f"   [SAVED -> {target_csv.name}] {image_id} | "
+                    f"Tortuosity={descriptors['tortuosity_len_to_diag']:.2f}, "
+                    f"Doubled={descriptors['doubled_path_prop']*100:.1f}%, "
+                    f"Bridge={descriptors['mst_bridge_len_prop']*100:.1f}%, "
+                    f"Ks={[r['k'] for r in recons]}"
+                )
+
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                print(f"   [WARNING] Skipping {image_id} due to pipeline error: {exc}")
+
+    except KeyboardInterrupt:
+        print("\n" + "=" * 65)
+        print("PAUSED BY USER (Ctrl+C). All completed images and CSV rows are safely saved!")
+        print(
+            f"Current Totals -> QuickDraw CSV: {len(completed_qd)} rows | "
+            f"TU-Berlin CSV: {len(completed_tub)} rows."
+        )
+        print("Re-run this script at any time to resume from the exact next image.")
+        print("=" * 65)
+        sys.exit(0)
+
+    print("\n" + "=" * 65)
+    print(f"RUN COMPLETE! Newly processed in this session: {newly_processed} input images.")
+    print(f"Quick, Draw! CSV ({len(completed_qd)} rows): '{QUICKDRAW_CSV_PATH}'")
+    print(f"TU-Berlin CSV    ({len(completed_tub)} rows): '{TUBERLIN_CSV_PATH}'")
+    print("=" * 65)
 
 
 if __name__ == "__main__":
-    build_regression_dataset(num_images=NUM_IMAGES)
+    run_dataset_generation(max_per_dataset=MAX_IMAGES_PER_DATASET)
