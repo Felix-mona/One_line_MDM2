@@ -1,178 +1,113 @@
 """
-This contains the functions related to the producing and comparing of the different Loss functions that we will produce
-We could now use different metrics to show for different things:
- - informative ( Does the sketch match the original? )
- - Fluid ( Does the curve flow? )
- - Clean ( Is there junk in the sketch )
- - Simplicity ( Is it the smallest cutoff K possible )
- - Artefacts ( How far the line strays outside the original bounding box, Gibb's ringing.)
-
+Metric.py
+Fast O(N log N) cKDTree Hausdorff Accuracy and scale-invariant Turning-Angle
+Smoothness metrics for high-resolution (N >= 10,000) Fourier reconstructions.
 """
+
 import numpy as np
-import matplotlib.pyplot as plt
+from scipy.spatial import cKDTree
 import Fourier_reconsctruction as fourier
-from scipy.spatial.distance import directed_hausdorff
-
-def Loss(accuracy,smoothness,alpha=1,beta=1):
-    """
-    INPUT:
-     - alpha, the coefficient of the accuracy
-     - beta, the coefficient of the smoothness
 
 
-    OUTPUT
-     - loss, the Loss value of the current image
-    If no alpha and Beta are given then the default values will be equal and the Loss(x) will purely depend on the smoothness and accuracy
-    """
+def Loss(accuracy, smoothness, alpha=0.5, beta=0.5):
+    """Computes weighted linear combination of accuracy and smoothness in [0, 1]."""
+    if not np.isclose(alpha + beta, 1.0, atol=1e-5):
+        raise ValueError(f"alpha ({alpha}) + beta ({beta}) must equal 1.0")
+    return float(alpha * accuracy + beta * smoothness)
 
-    #error checking that alpha and beta == 1
-    if alpha + beta != 1:
-        print("error, alpha plus beta must equal 1")
-        return
 
-    #error checking the accuracy and smoothness to be between bounds and normalised
-    if (accuracy < 0  or accuracy > 1) or (smoothness < 0 or smoothness > 1):
-        print("the accuracy or the smoothness is out of bounds, should be between [0,1]") 
+def gather_lowest_metric(coefficients, max_frequency_cutoff, samples, alpha_beta_pairs, original_points=None):
+    """Evaluates (k, alpha, beta) combinations across `samples` frequency cutoffs."""
+    if original_points is None:
+        original_points = fourier.inverse_fourier_descriptors(coefficients)
 
-    loss = alpha*accuracy + beta*smoothness
-    return loss
-
-def gather_lowest_metric(coefficients,max_frequency_cutoff,samples,alpha_beta_pairs):
-    """
-    INPUT:
-     - coefficients, a list of the fourier coefficients
-     - max frequency - integer, The highest frequency that we wish to sample the image with
-     - samples - integer, the amount of different frequencies cutoffs to sample, linearly from 0 to max_frequency (Might have something to do with the discretisation number initially!!)
-     - alpha_beta pairs - list of tuples, a list containing coordinate style alpha and beta pairs to test through the different frequencies
-
-     OUTPUT:
-      - [k, alpha, beta] the 3 values for which the loss function scored the lowest
-    """
-    frequencies = np.linspace(1,max_frequency_cutoff,samples)
+    frequencies = np.unique(np.linspace(1, max_frequency_cutoff, int(samples), dtype=int))
     combination_per_freq = []
-    
+
     for k in frequencies:
-        k = int(k) #cast to int as the frequencies are floats and we need to use them as integers for the filter function
-        min_loss = 10 # make a starting min loss above the highest possible loss
+        k = int(k)
+        min_loss = float("inf")
         minimum_combination = []
-        kfiltered = fourier.filter_coeffs(coefficients,k)
+        kfiltered = fourier.filter_coeffs(coefficients, k)
+        temp_ifd = fourier.inverse_fourier_descriptors(kfiltered)
+
+        temp_accuracy, _ = calc_metric(temp_ifd, original_points, "accuracy")
+        temp_smoothness = calc_metric(temp_ifd, original_points, "smoothness")
 
         for alpha, beta in alpha_beta_pairs:
-            #compute metric values and normalise from the metric file
-            temp_ifd = fourier.inverse_fourier_descriptors(kfiltered)
-            temp_accuracy = calc_metric(temp_ifd,coefficients,'accuracy')
-            temp_smoothness = calc_metric(temp_ifd,coefficients,'smoothness')
-
-            temp_loss = Loss(temp_accuracy,temp_smoothness,alpha=alpha, beta=beta)
-            if (temp_loss) < min_loss:
+            temp_loss = Loss(temp_accuracy, temp_smoothness, alpha=alpha, beta=beta)
+            if temp_loss < min_loss:
                 min_loss = temp_loss
-                minimum_combination = [k,alpha,beta] #kth frequency, current alpha, current beta E.G [50,0,1]
-            else:
-                continue
+                minimum_combination = [k, alpha, beta]
 
         combination_per_freq.append(minimum_combination)
 
     return combination_per_freq
 
 
-
-def len_btwn_points(a, b):
-    ab = b - a
-    len = np.sqrt(abs(ab[:,:1] + ab[:,1:]))
-    return len
-
-
 def calculate_distances(coords1: np.ndarray, coords2: np.ndarray) -> np.ndarray:
-    """
-    Calculate the Euclidean distance between pairs of (x, y) coordinates.
-
-    Args:
-        coords1: NumPy array of shape (N, 2).
-        coords2: NumPy array of shape (N, 2).
-
-    Returns:
-        NumPy array of shape (N,) containing the distances.
-    """
+    """Calculates Euclidean distances between row-wise pairs of (x, y) coordinates."""
     return np.linalg.norm(coords1 - coords2, axis=1)
 
 
+def calc_metric(new_image, old_image, mtype=None, tree_old=None):
+    """
+    Computes 'Accuracy' (exact two-way Hausdorff distance via O(N log N) cKDTree)
+    or 'Smoothness' (stride-normalised mean exterior turning angle).
+    """
+    if mtype in ("accuracy", "Accuracy"):
+        A = np.column_stack((np.real(old_image), np.imag(old_image)))
+        B = np.column_stack((np.real(new_image), np.imag(new_image)))
 
-def calc_metric(new_image, old_image, mtype=None):
+        if tree_old is None:
+            tree_old = cKDTree(A)
+        tree_new = cKDTree(B)
 
-    if mtype == 'accuracy' or mtype == 'Accuracy':
+        # Directed Hausdorff A -> B (for each point in A, distance to nearest in B)
+        dists_a_to_b, nearest_b_for_a = tree_new.query(A, k=1)
+        i1 = int(np.argmax(dists_a_to_b))
+        d1 = float(dists_a_to_b[i1])
+        j1 = int(nearest_b_for_a[i1])
 
-        A = np.column_stack((
-            np.real(old_image),
-            np.imag(old_image)
-        ))
+        # Directed Hausdorff B -> A (for each point in B, distance to nearest in A)
+        dists_b_to_a, nearest_a_for_b = tree_old.query(B, k=1)
+        i2 = int(np.argmax(dists_b_to_a))
+        d2 = float(dists_b_to_a[i2])
+        j2 = int(nearest_a_for_b[i2])
 
-        B = np.column_stack((
-            np.real(new_image),
-            np.imag(new_image)
-        ))
-
-        # Calculate each directed Hausdorff distance
-        d1, i1, j1 = directed_hausdorff(A, B)
-        d2, i2, j2 = directed_hausdorff(B, A)
-
-        # Determine which direction produces the Hausdorff distance
         if d1 >= d2:
             d = d1
-            point1 = i1  # Original image
-            point2 = j1  # Nearest reconstructed point
-            direction = 'original_to_reconstructed'
-
+            point1, point2 = i1, j1
+            direction = "original_to_reconstructed"
         else:
             d = d2
-            point1 = j2  # Nearest original point
-            point2 = i2  # Reconstructed image
-            direction = 'reconstructed_to_original'
+            point1, point2 = j2, i2
+            direction = "reconstructed_to_original"
 
-        # Normalise by image scale
-        both = np.concatenate((old_image, new_image))
-        scale = np.hypot(
-            np.ptp(both.real),
-            np.ptp(both.imag)
-        )
+        both_real_ptp = max(np.ptp(A[:, 0]), np.ptp(B[:, 0]))
+        both_imag_ptp = max(np.ptp(A[:, 1]), np.ptp(B[:, 1]))
+        scale = float(np.hypot(both_real_ptp, both_imag_ptp))
 
-        accuracy = d / scale if scale > 0 else 0.0
-
+        accuracy = float(d / scale) if scale > 0 else 0.0
         index = (point1, point2, direction)
-
         return accuracy, index
 
-    elif mtype == 'smoothness' or mtype == 'Smoothness':
+    elif mtype in ("smoothness", "Smoothness"):
+        A_coords = np.column_stack((np.real(new_image), np.imag(new_image)))
+        # Normalise step stride to ~1000 effective segments so Smoothness is invariant to N_SAMPLES
+        stride = max(1, len(A_coords) // 1000)
 
-        A_coords = np.column_stack((
-            np.real(new_image),
-            np.imag(new_image)
-        ))
-
-        B_coords = np.roll(A_coords, 1, axis=0)
-        C_coords = np.roll(A_coords, -1, axis=0)
+        B_coords = np.roll(A_coords, stride, axis=0)
+        C_coords = np.roll(A_coords, -stride, axis=0)
 
         c = calculate_distances(A_coords, B_coords)
         b = calculate_distances(A_coords, C_coords)
         a = calculate_distances(B_coords, C_coords)
 
-        cos_angle = (b**2 + c**2 - a**2) / (2*b*c)
-        cos_angle = np.clip(cos_angle, -1.0, 1.0)
-
+        denom = np.maximum(2.0 * b * c, 1e-12)
+        cos_angle = np.clip((b**2 + c**2 - a**2) / denom, -1.0, 1.0)
         angle = np.arccos(cos_angle)
-
-        return 1 - np.mean(angle/np.pi)
+        return float(1.0 - np.mean(angle / np.pi))
 
     else:
-        pass
-
-
-
-
-
-
-
-
-
-
-
-    
+        raise ValueError(f"Unsupported mtype '{mtype}'. Expected 'Accuracy' or 'Smoothness'.")

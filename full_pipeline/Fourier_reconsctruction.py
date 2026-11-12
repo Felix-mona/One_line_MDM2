@@ -6,6 +6,7 @@ and fast binary-search K selection for single or multiple accuracy thresholds.
 """
 
 from collections.abc import Iterable
+from scipy.spatial import cKDTree
 import numpy as np
 import scipy.fft as fft
 import svgwrite
@@ -182,6 +183,79 @@ def find_lowest_k_for_accuracy(
     return best_k, recon_best, acc_best, idx_best, True
 
 
+def find_lowest_k_for_accuracy(
+    coeffs,
+    original_z,
+    target_accuracy,
+    min_k=1,
+    max_k=None,
+    gibbs_window=4,
+    eval_cache=None,
+):
+    """
+    Finds the lowest frequency cutoff K achieving Hausdorff Accuracy <= target_accuracy
+    at N = 10,000+ samples using a pre-built cKDTree on original_z + Binary Search.
+    """
+    n = len(coeffs)
+    if max_k is None:
+        max_k = (n - 1) // 2
+    max_k = max(1, min(int(max_k), (n - 1) // 2))
+    low = max(1, int(min_k))
+    high = max(low, max_k)
+
+    if eval_cache is None:
+        eval_cache = {}
+
+    # Build the KD-Tree for the 10,000-point original curve ONCE
+    if "_tree_old" not in eval_cache:
+        orig_xy = np.column_stack((np.real(original_z), np.imag(original_z)))
+        eval_cache["_tree_old"] = cKDTree(orig_xy)
+    tree_old = eval_cache["_tree_old"]
+
+    def evaluate_k(k):
+        k = int(k)
+        if k not in eval_cache:
+            filtered = filter_coeffs(coeffs, k)
+            recon_z = inverse_fourier_descriptors(filtered)
+            acc, idx = met.calc_metric(recon_z, original_z, mtype="Accuracy", tree_old=tree_old)
+            eval_cache[k] = (recon_z, acc, idx)
+        return eval_cache[k]
+
+    # 1. Check lower bound
+    recon_low, acc_low, idx_low = evaluate_k(low)
+    if acc_low <= target_accuracy:
+        return low, recon_low, acc_low, idx_low, True
+
+    # 2. Check upper bound
+    recon_high, acc_high, idx_high = evaluate_k(high)
+    if acc_high > target_accuracy:
+        print(
+            f"Warning: target_accuracy={target_accuracy} not reached by max_k={high} "
+            f"(achieved accuracy={acc_high:.4f}). Using K={high}."
+        )
+        return high, recon_high, acc_high, idx_high, False
+
+    # 3. Binary search in [low, high]
+    best_k = high
+    while low <= high:
+        mid = (low + high) // 2
+        _, acc_mid, _ = evaluate_k(mid)
+        if acc_mid <= target_accuracy:
+            best_k = mid
+            high = mid - 1
+        else:
+            low = mid + 1
+
+    # 4. Local backwards check in case of minor Gibbs ringing ripples
+    check_start = max(int(min_k), best_k - gibbs_window)
+    for k_cand in range(check_start, best_k):
+        _, acc_cand, _ = evaluate_k(k_cand)
+        if acc_cand <= target_accuracy:
+            best_k = k_cand
+            break
+
+    recon_best, acc_best, idx_best = evaluate_k(best_k)
+    return best_k, recon_best, acc_best, idx_best, True
 def reconstruct_for_accuracy_thresholds(
     coeffs,
     original_z,

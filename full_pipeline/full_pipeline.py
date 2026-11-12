@@ -199,7 +199,7 @@ def run_oneline_pipeline(
     output_path,
     # --- Stage 5: Single Accuracy Threshold or List of Thresholds ---
     accuracy_thresholds=0.01,
-    n_samples=1000,
+    n_samples=10000,
     mirror_path=False,
     max_frequency_cutoff=None,
     gibbs_window=4,
@@ -515,8 +515,8 @@ def run_oneline_pipeline(
 if __name__ == "__main__":
     survey_results = run_oneline_pipeline(
         image_path="images/Sunflower/Sunflower.png",
-        output_path="outputs3/Sunflower",
-        accuracy_thresholds=[0.01, 0.034, 0.058, 0.082, 0.106],
+        output_path="outputs4/Sunflower",
+        accuracy_thresholds=[0.005, 0.01,0.02,0.04, 0.07],
         n_samples=10000,
         show_labels_on_image=True,
         save_all_intermediaries=True,
