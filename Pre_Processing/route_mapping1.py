@@ -1,18 +1,31 @@
+
 import networkx as nx
 import numpy as np
 import matplotlib.pyplot as plt
+
+# ==========================================================
+# ROUTE TUNING PARAMETERS
+# ==========================================================
+
+ALPHA = 1 # Angle weighting: change this value yourself
+
+BETA = 60     # Duplicated-edge preference (degrees)
+GAMMA = 1000  # Bridge penalty
+
 
 # ==========================================================
 # GEOMETRY FUNCTIONS
 # ==========================================================
 
 def compute_polyline_length(pts):
+
     return np.sum(
         np.linalg.norm(
             pts[1:] - pts[:-1],
             axis=1
         )
     )
+
 
 def edge_direction(pts):
 
@@ -24,6 +37,7 @@ def edge_direction(pts):
         return np.array([1.0, 0.0])
 
     return vec / norm
+
 
 def angle_between(v1, v2):
 
@@ -45,33 +59,93 @@ def angle_between(v1, v2):
     return np.arccos(dot)
 
 
+def traversal_direction(pts, current_pos):
+
+    d1 = np.linalg.norm(pts[0] - current_pos)
+    d2 = np.linalg.norm(pts[-1] - current_pos)
+
+    if d2 < d1:
+        pts = pts[::-1]
+
+    return edge_direction(pts)
+
+
 # ==========================================================
-# ROUTE QUALITY ANALYSIS
+# WEIGHTED PATH COST
 # ==========================================================
+
+def compute_angle_weighted_cost(
+    distance,
+    total_angle,
+    alpha=ALPHA
+):
+
+    theta = np.radians(total_angle)
+
+    return (
+        distance *
+        (
+            1 +
+            alpha * np.sin(theta / 2)
+        )
+    )
+
+
+def compute_path_deflection(G, path):
+
+    total_angle = 0.0
+    previous_dir = None
+
+    for a, b in zip(path[:-1], path[1:]):
+
+        edge_data = min(
+            G.get_edge_data(a, b).values(),
+            key=lambda d: d["weight"]
+        )
+
+        direction = traversal_direction(
+            edge_data["pts"],
+            G.nodes[a]["pos"]
+        )
+
+        if previous_dir is not None:
+
+            total_angle += np.degrees(
+                angle_between(
+                    previous_dir,
+                    direction
+                )
+            )
+
+        previous_dir = direction
+
+    return total_angle
+
 
 def compute_total_turn_angle(E, route):
 
-    total_angle = 0
+    total_angle = 0.0
+    previous_dir = None
 
-    for i in range(len(route) - 1):
+    for u, v, k in route:
 
-        u1, v1, k1 = route[i]
-        u2, v2, k2 = route[i + 1]
+        pts = E[u][v][k]["pts"]
 
-        dir1 = edge_direction(
-            E[u1][v1][k1]["pts"]
+        direction = traversal_direction(
+            pts,
+            E.nodes[u]["pos"]
         )
 
-        dir2 = edge_direction(
-            E[u2][v2][k2]["pts"]
-        )
+        if previous_dir is not None:
 
-        angle = angle_between(
-            dir1,
-            dir2
-        )
+            total_angle += np.degrees(
+                angle_between(
+                    previous_dir,
+                    direction
+                )
+            )
 
-        total_angle += np.degrees(angle)
+        previous_dir = direction
 
     return total_angle
 
@@ -117,6 +191,10 @@ def find_odd_nodes(G):
     ]
 
 
+# ==========================================================
+# WEIGHTED SHORTEST PATHS
+# ==========================================================
+
 def compute_odd_node_shortest_paths(
     G,
     odd_nodes
@@ -126,21 +204,83 @@ def compute_odd_node_shortest_paths(
 
     for i, u in enumerate(odd_nodes):
 
-        lengths, paths = nx.single_source_dijkstra(
-            G,
-            source=u,
-            weight="weight"
-        )
-
         for v in odd_nodes[i + 1:]:
 
+            best_cost = float("inf")
+            best_path = None
+            best_distance = 0
+            best_angle = 0
+
+            # Explore simple paths and evaluate the
+            # complete weighted path equation.
+
+            for path in nx.all_simple_paths(
+                G,
+                source=u,
+                target=v
+            ):
+
+                distance = 0.0
+                total_angle = 0.0
+                previous_dir = None
+
+                # Evaluate each edge in traversal order.
+
+                for a, b in zip(
+                    path[:-1],
+                    path[1:]
+                ):
+
+                    edge_data = min(
+                        G.get_edge_data(a, b).values(),
+                        key=lambda d: d["weight"]
+                    )
+
+                    distance += edge_data["weight"]
+
+                    direction = traversal_direction(
+                        edge_data["pts"],
+                        G.nodes[a]["pos"]
+                    )
+
+                    if previous_dir is not None:
+
+                        total_angle += np.degrees(
+                            angle_between(
+                                previous_dir,
+                                direction
+                            )
+                        )
+
+                    previous_dir = direction
+
+                # Apply the complete weighted equation.
+
+                weighted_cost = compute_angle_weighted_cost(
+                    distance,
+                    total_angle
+                )
+
+                if weighted_cost < best_cost:
+
+                    best_cost = weighted_cost
+                    best_path = path
+                    best_distance = distance
+                    best_angle = total_angle
+
             shortest[(u, v)] = {
-                "distance": lengths[v],
-                "path": paths[v]
+                "distance": best_distance,
+                "total_angle": best_angle,
+                "weighted_cost": best_cost,
+                "path": best_path
             }
 
     return shortest
 
+
+# ==========================================================
+# MINIMUM WEIGHT MATCHING
+# ==========================================================
 
 def minimum_weight_matching(
     odd_nodes,
@@ -154,7 +294,7 @@ def minimum_weight_matching(
         matching_graph.add_edge(
             u,
             v,
-            weight=-info["distance"]
+            weight=-info["weighted_cost"]
         )
 
     return nx.max_weight_matching(
@@ -162,6 +302,10 @@ def minimum_weight_matching(
         maxcardinality=True
     )
 
+
+# ==========================================================
+# EULERISE GRAPH
+# ==========================================================
 
 def eulerise_graph(
     G,
@@ -234,6 +378,13 @@ def route_to_polyline(
 
         if len(drawing_pts) == 0:
 
+            if np.linalg.norm(
+                pts[-1] - E.nodes[u]["pos"]
+            ) < np.linalg.norm(
+                pts[0] - E.nodes[u]["pos"]
+            ):
+                pts = pts[::-1]
+
             drawing_pts.extend(pts)
 
             continue
@@ -253,9 +404,7 @@ def route_to_polyline(
             pts[1:]
         )
 
-    return np.array(
-        drawing_pts
-    )
+    return np.array(drawing_pts)
 
 
 # ==========================================================
@@ -266,9 +415,7 @@ def chinese_postman(final_graph):
 
     print("Building weighted graph...")
 
-    G = build_cpp_graph(
-        final_graph
-    )
+    G = build_cpp_graph(final_graph)
 
     odd_nodes = find_odd_nodes(G)
 
@@ -282,14 +429,25 @@ def chinese_postman(final_graph):
 
     else:
 
-        print("Finding shortest paths...")
+        print("Finding angle-weighted shortest paths...")
 
         shortest = compute_odd_node_shortest_paths(
             G,
             odd_nodes
         )
 
-        print("Solving matching...")
+        print("Evaluating weighted path costs...")
+
+        for (u, v), info in shortest.items():
+
+            print(
+                f"Path {u} -> {v}: "
+                f"Length = {info['distance']:.2f}, "
+                f"Angle = {info['total_angle']:.2f}, "
+                f"Weighted cost = {info['weighted_cost']:.2f}"
+            )
+
+        print("Solving weighted matching...")
 
         matching = minimum_weight_matching(
             odd_nodes,
@@ -432,7 +590,14 @@ def plot_route(E, route):
 
     for i, (u, v, k) in enumerate(route):
 
-        pts = E[u][v][k]["pts"]
+        pts = E[u][v][k]["pts"].copy()
+
+        if np.linalg.norm(
+            pts[-1] - E.nodes[u]["pos"]
+        ) < np.linalg.norm(
+            pts[0] - E.nodes[u]["pos"]
+        ):
+            pts = pts[::-1]
 
         colour = cmap(i / max(N,1))
 
@@ -502,6 +667,7 @@ for n, pos in positions.items():
         )
     )
 
+
 def add_edge(a,b):
 
     pts = np.array([
@@ -514,6 +680,7 @@ def add_edge(a,b):
         b,
         pts=pts
     )
+
 
 add_edge(0,1)
 add_edge(1,2)
@@ -544,6 +711,7 @@ add_edge(2,7)
 add_edge(4,9)
 add_edge(6,9)
 add_edge(6,11)
+
 
 # ==========================================================
 # RUN
@@ -576,8 +744,30 @@ turning_angle = compute_total_turn_angle(
     route
 )
 
+total_distance = sum(
+    E[u][v][k]["weight"]
+    for u, v, k in route
+)
+
+weighted_route_cost = compute_angle_weighted_cost(
+    total_distance,
+    turning_angle
+)
+
+print(
+    f"Total route distance: {total_distance:.2f}"
+)
+
 print(
     f"Total turning angle: {turning_angle:.2f} degrees"
+)
+
+print(
+    f"Alpha: {ALPHA}"
+)
+
+print(
+    f"Weighted route cost: {weighted_route_cost:.2f}"
 )
 
 plot_original_graph(final_graph)
