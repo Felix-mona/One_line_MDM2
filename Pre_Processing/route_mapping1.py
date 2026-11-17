@@ -1,16 +1,17 @@
-
 import networkx as nx
 import numpy as np
 import matplotlib.pyplot as plt
 
 # ==========================================================
-# ROUTE TUNING PARAMETERS
+# PARAMETERS
 # ==========================================================
 
-ALPHA = 1 # Angle weighting: change this value yourself
+# ALPHA is no longer used for routing. It is only used to
+# report a weighted cost for the final route.
+ALPHA = 0
 
-BETA = 60     # Duplicated-edge preference (degrees)
-GAMMA = 1000  # Bridge penalty
+BETA = 60     # (unused) Duplicated-edge preference (degrees)
+GAMMA = 1000  # (unused) Bridge penalty
 
 
 # ==========================================================
@@ -71,7 +72,7 @@ def traversal_direction(pts, current_pos):
 
 
 # ==========================================================
-# WEIGHTED PATH COST
+# ROUTE METRICS
 # ==========================================================
 
 def compute_angle_weighted_cost(
@@ -89,37 +90,6 @@ def compute_angle_weighted_cost(
             alpha * np.sin(theta / 2)
         )
     )
-
-
-def compute_path_deflection(G, path):
-
-    total_angle = 0.0
-    previous_dir = None
-
-    for a, b in zip(path[:-1], path[1:]):
-
-        edge_data = min(
-            G.get_edge_data(a, b).values(),
-            key=lambda d: d["weight"]
-        )
-
-        direction = traversal_direction(
-            edge_data["pts"],
-            G.nodes[a]["pos"]
-        )
-
-        if previous_dir is not None:
-
-            total_angle += np.degrees(
-                angle_between(
-                    previous_dir,
-                    direction
-                )
-            )
-
-        previous_dir = direction
-
-    return total_angle
 
 
 def compute_total_turn_angle(E, route):
@@ -192,7 +162,7 @@ def find_odd_nodes(G):
 
 
 # ==========================================================
-# WEIGHTED SHORTEST PATHS
+# SHORTEST PATHS (DISTANCE ONLY)
 # ==========================================================
 
 def compute_odd_node_shortest_paths(
@@ -206,80 +176,30 @@ def compute_odd_node_shortest_paths(
 
         for v in odd_nodes[i + 1:]:
 
-            best_cost = float("inf")
-            best_path = None
-            best_distance = 0
-            best_angle = 0
-
-            # Explore simple paths and evaluate the
-            # complete weighted path equation.
-
-            for path in nx.all_simple_paths(
+            path = nx.dijkstra_path(
                 G,
-                source=u,
-                target=v
-            ):
+                u,
+                v,
+                weight="weight"
+            )
 
-                distance = 0.0
-                total_angle = 0.0
-                previous_dir = None
-
-                # Evaluate each edge in traversal order.
-
-                for a, b in zip(
-                    path[:-1],
-                    path[1:]
-                ):
-
-                    edge_data = min(
-                        G.get_edge_data(a, b).values(),
-                        key=lambda d: d["weight"]
-                    )
-
-                    distance += edge_data["weight"]
-
-                    direction = traversal_direction(
-                        edge_data["pts"],
-                        G.nodes[a]["pos"]
-                    )
-
-                    if previous_dir is not None:
-
-                        total_angle += np.degrees(
-                            angle_between(
-                                previous_dir,
-                                direction
-                            )
-                        )
-
-                    previous_dir = direction
-
-                # Apply the complete weighted equation.
-
-                weighted_cost = compute_angle_weighted_cost(
-                    distance,
-                    total_angle
-                )
-
-                if weighted_cost < best_cost:
-
-                    best_cost = weighted_cost
-                    best_path = path
-                    best_distance = distance
-                    best_angle = total_angle
+            distance = nx.dijkstra_path_length(
+                G,
+                u,
+                v,
+                weight="weight"
+            )
 
             shortest[(u, v)] = {
-                "distance": best_distance,
-                "total_angle": best_angle,
-                "weighted_cost": best_cost,
-                "path": best_path
+                "distance": distance,
+                "path": path
             }
 
     return shortest
 
 
 # ==========================================================
-# MINIMUM WEIGHT MATCHING
+# MINIMUM WEIGHT MATCHING (DISTANCE ONLY)
 # ==========================================================
 
 def minimum_weight_matching(
@@ -294,7 +214,7 @@ def minimum_weight_matching(
         matching_graph.add_edge(
             u,
             v,
-            weight=-info["weighted_cost"]
+            weight=-info["distance"]
         )
 
     return nx.max_weight_matching(
@@ -348,17 +268,87 @@ def eulerise_graph(
 
 
 # ==========================================================
-# EULER ROUTE
+# EULER ROUTE (FLEURY + MINIMUM ANGLE DEFLECTION)
 # ==========================================================
 
-def build_euler_route(E):
+def build_euler_route(E, start=None):
+    """
+    Walk every edge of the Eulerian multigraph E exactly once.
 
-    return list(
-        nx.eulerian_circuit(
-            E,
-            keys=True
+    At each node, choose the untraversed edge that gives the
+    smallest turn relative to the previous direction of travel.
+    Bridges (in the remaining graph) are avoided unless they are
+    the only option, which guarantees no edge is stranded.
+    """
+
+    R = E.copy()  # remaining (untraversed) edges
+
+    if start is None:
+        start = min(E.nodes)
+
+    current = start
+    previous_dir = None
+    route = []
+
+    def is_bridge(u, v, k):
+
+        # Only one edge left at u: forced move, not a problem
+        if R.degree(u) == 1:
+            return False
+
+        data = dict(R[u][v][k])
+
+        R.remove_edge(u, v, key=k)
+        connected = nx.has_path(R, u, v)
+        R.add_edge(u, v, key=k, **data)
+
+        return not connected
+
+    while R.number_of_edges() > 0:
+
+        candidates = []
+
+        for _, nbr, k in R.edges(current, keys=True):
+
+            pts = R[current][nbr][k]["pts"]
+
+            direction = traversal_direction(
+                pts,
+                E.nodes[current]["pos"]
+            )
+
+            if previous_dir is None:
+                deflection = 0.0
+            else:
+                deflection = angle_between(
+                    previous_dir,
+                    direction
+                )
+
+            candidates.append(
+                (deflection, nbr, k, direction)
+            )
+
+        safe = [
+            c for c in candidates
+            if not is_bridge(current, c[1], c[2])
+        ]
+
+        pool = safe if safe else candidates
+
+        deflection, nbr, k, direction = min(
+            pool,
+            key=lambda c: c[0]
         )
-    )
+
+        route.append((current, nbr, k))
+
+        R.remove_edge(current, nbr, key=k)
+
+        previous_dir = direction
+        current = nbr
+
+    return route
 
 
 # ==========================================================
@@ -429,25 +419,21 @@ def chinese_postman(final_graph):
 
     else:
 
-        print("Finding angle-weighted shortest paths...")
+        print("Finding shortest paths (distance only)...")
 
         shortest = compute_odd_node_shortest_paths(
             G,
             odd_nodes
         )
 
-        print("Evaluating weighted path costs...")
-
         for (u, v), info in shortest.items():
 
             print(
                 f"Path {u} -> {v}: "
-                f"Length = {info['distance']:.2f}, "
-                f"Angle = {info['total_angle']:.2f}, "
-                f"Weighted cost = {info['weighted_cost']:.2f}"
+                f"Length = {info['distance']:.2f}"
             )
 
-        print("Solving weighted matching...")
+        print("Solving minimum weight matching...")
 
         matching = minimum_weight_matching(
             odd_nodes,
@@ -466,7 +452,7 @@ def chinese_postman(final_graph):
             shortest
         )
 
-    print("Computing Euler circuit...")
+    print("Computing angle-guided Euler circuit...")
 
     route = build_euler_route(E)
 
@@ -738,6 +724,20 @@ print(
     "Graph Eulerian:",
     nx.is_eulerian(E)
 )
+
+# ----------------------------------------------------------
+# Completeness checks: every edge used exactly once
+# ----------------------------------------------------------
+
+assert len(route) == E.number_of_edges(), \
+    "Some edges were missed!"
+
+assert len(
+    {(min(u, v), max(u, v), k) for u, v, k in route}
+) == len(route), \
+    "Some edges were traversed more than once!"
+
+print("All edges traversed exactly once: OK")
 
 turning_angle = compute_total_turn_angle(
     E,
