@@ -569,4 +569,4 @@ def plot_bridged_graph(G, save_path="bridged_graph.png", title="Double MST Bridg
     ax.axis("off")
     plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.1, facecolor="white")
     plt.close(fig)
-    print(f"Saved bridged graph plot to '{save_path}'")
+    print(f"Saved bridged graph plot to '{save_path}'") 
