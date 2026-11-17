@@ -23,7 +23,6 @@ OFFSETS = [
 # ==========================================================
 # 1. PRE-PROCESSING, RESCALING & BINARISATION (2.1.1)
 # ==========================================================
-
 def load_and_scale_image(
     image_path,
     input_stroke_width=8.0,
@@ -42,7 +41,6 @@ def load_and_scale_image(
             gray_img = Image.alpha_composite(white, rgba).convert("L")
         else:
             gray_img = img.convert("L")
-
         arr = np.array(gray_img, dtype=np.uint8)
 
     binary = arr < threshold
@@ -87,7 +85,6 @@ def run_lee_skeletonisation(binary_mask):
 # ==========================================================
 # 2. RUTOVITZ CROSSING NUMBERS & CANONICAL NODES (2.1.2)
 # ==========================================================
-
 def compute_rutovitz_crossing_number(skeleton):
     """
     Vectorised Rutovitz crossing number across the 8-neighbourhood:
@@ -96,7 +93,6 @@ def compute_rutovitz_crossing_number(skeleton):
     """
     skel_bin = (skeleton > 0).astype(np.int8)
     padded = np.pad(skel_bin, pad_width=1, mode="constant", constant_values=0)
-
     p_ring = [
         padded[:-2, 1:-1],  # N
         padded[:-2, 2:],    # NE
@@ -107,7 +103,6 @@ def compute_rutovitz_crossing_number(skeleton):
         padded[1:-1, :-2],  # W
         padded[:-2, :-2],   # NW
     ]
-
     transitions = sum(np.abs(p_ring[(i + 1) % 8] - p_ring[i]) for i in range(8))
     return ((transitions // 2) * skel_bin).astype(np.uint8)
 
@@ -144,12 +139,10 @@ def extract_canonical_nodes(skeleton, crossing_number, merge_dist_work):
     # 3. Merge nearby nodes via KD-Tree and bridge intermediate skeleton pixels
     final_nodes, final_types, final_members = {}, {}, {}
     skel_set = set(map(tuple, np.argwhere(skeleton > 0)))
-
     if len(raw_nodes) > 0 and merge_dist_work > 0.0:
         raw_ids = list(raw_nodes.keys())
         coords = np.array([raw_nodes[i] for i in raw_ids])
         pairs = cKDTree(coords).query_pairs(r=merge_dist_work)
-
         mg = nx.Graph()
         mg.add_nodes_from(raw_ids)
         mg.add_edges_from((raw_ids[i], raw_ids[j]) for i, j in pairs)
@@ -184,7 +177,6 @@ def extract_canonical_nodes(skeleton, crossing_number, merge_dist_work):
             pix_arr = np.array(list(combined))
             centroid = pix_arr.mean(axis=0)
             best_px = pix_arr[np.argmin(np.sum((pix_arr - centroid) ** 2, axis=1))]
-
             final_nodes[new_id] = (int(best_px[0]), int(best_px[1]))
             final_types[new_id] = "junction" if is_junc else "endpoint"
             final_members[new_id] = list(combined)
@@ -204,7 +196,6 @@ def extract_canonical_nodes(skeleton, crossing_number, merge_dist_work):
 # ==========================================================
 # 3. LOSSLESS SKELETON TRACING & RDP DECIMATION (2.1.3)
 # ==========================================================
-
 def _bfs_cluster_path(start, end, valid_pixels):
     """Shortest 8-connected walk inside a node cluster."""
     if start == end:
@@ -259,13 +250,11 @@ def trace_skeleton_to_graph(skeleton, nodes, node_types, node_grid, node_members
     for u_id, u_pos in list(nodes.items()):
         u_pixels = node_members.get(u_id, [u_pos])
         u_set = set(u_pixels)
-
         for p in u_pixels:
             for dr, dc in OFFSETS:
                 nr, nc = p[0] + dr, p[1] + dc
                 if not (0 <= nr < H and 0 <= nc < W) or not skeleton[nr, nc]:
                     continue
-
                 nbr_id = int(node_grid[nr, nc])
 
                 # Case A: Unvisited interior stroke pixel
@@ -280,7 +269,6 @@ def trace_skeleton_to_graph(skeleton, nodes, node_types, node_grid, node_members
                         path.append((curr_r, curr_c))
                         visited[curr_r, curr_c] = True
                         steps += 1
-
                         path_nbrs, other_nodes, self_nodes = [], [], []
                         for s_dr, s_dc in OFFSETS:
                             sr, sc = curr_r + s_dr, curr_c + s_dc
@@ -376,17 +364,14 @@ def rdp_simplify(points, epsilon):
     pts = np.asarray(points, dtype=float)
     if len(pts) <= 2 or epsilon <= 0.0:
         return pts
-
     start, end = pts[0], pts[-1]
     line_vec = end - start
     line_len = float(np.hypot(line_vec[0], line_vec[1]))
-
     diff = pts[1:-1] - start
     if line_len < 1e-12:
         dists = np.hypot(diff[:, 0], diff[:, 1])
     else:
         dists = np.abs(line_vec[0] * diff[:, 1] - line_vec[1] * diff[:, 0]) / line_len
-
     max_idx = int(np.argmax(dists)) + 1
     if dists[max_idx - 1] > epsilon:
         left = rdp_simplify(pts[:max_idx + 1], epsilon)
@@ -416,7 +401,6 @@ def apply_rdp_to_graph(G, epsilon):
 # ==========================================================
 # 4. LOOP-SAFE JUNCTION MERGING & CLEANING (2.1.4)
 # ==========================================================
-
 def polyline_length(pts):
     if len(pts) < 2:
         return 0.0
@@ -436,7 +420,6 @@ def dissolve_degree_two_nodes(G):
             edges = list(H.edges(node, keys=True, data=True))
             if len(edges) != 2 or any(u == v for u, v, _, _ in edges):
                 continue
-
             (u1, v1, k1, d1), (u2, v2, k2, d2) = edges
             nbr1 = v1 if u1 == node else u1
             nbr2 = v2 if u2 == node else u2
@@ -445,6 +428,7 @@ def dissolve_degree_two_nodes(G):
             pts1 = d1["pts"]
             if np.linalg.norm(pts1[-1] - node_pos) > np.linalg.norm(pts1[0] - node_pos):
                 pts1 = pts1[::-1]
+
             pts2 = d2["pts"]
             if np.linalg.norm(pts2[0] - node_pos) > np.linalg.norm(pts2[-1] - node_pos):
                 pts2 = pts2[::-1]
@@ -466,7 +450,6 @@ def merge_nearby_junctions(G, d_edge_thresh):
     self-loops (u == v) and parallel loop petals.
     """
     H = dissolve_degree_two_nodes(G)
-
     while True:
         short_g = nx.Graph()
         for u, v, k, data in H.edges(keys=True, data=True):
@@ -545,7 +528,6 @@ def merge_nearby_junctions(G, d_edge_thresh):
 def prune_whiskers_and_noise(G, whisker_thresh, min_comp_len):
     """Prunes tiny degree-1 terminal whiskers and tiny isolated noise specks."""
     H = G.copy()
-
     # 1. Prune short degree-1 whiskers
     changed = True
     while changed:
@@ -573,6 +555,21 @@ def prune_whiskers_and_noise(G, whisker_thresh, min_comp_len):
 # ==========================================================
 # 5. COMPLETE GRAPH FORMULATION PIPELINE & SAVING
 # ==========================================================
+def _create_clean_canvas(figsize=(10, 10), bg_color="white"):
+    """Creates a uniform borderless figure and axes with no ticks or frame."""
+    fig = plt.figure(figsize=figsize, facecolor=bg_color)
+    ax = fig.add_subplot(111)
+    ax.set_facecolor(bg_color)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    return fig, ax
+
+
+def _save_clean_canvas(fig, save_path, dpi=300, bg_color="white"):
+    """Saves a figure with consistent tight framing and no borders."""
+    plt.savefig(save_path, dpi=dpi, bbox_inches="tight", pad_inches=0.1, facecolor=bg_color)
+    plt.close(fig)
+
 
 def save_binary_or_skeleton_image(mask, save_path, label="image"):
     """Saves a binary mask or skeleton as a black-on-white PNG image."""
@@ -587,18 +584,16 @@ def save_skeleton_image(skeleton, save_path):
 
 
 def plot_junction_classification(skeleton, nodes, node_types, scale_factor, save_path):
-    """Saves a plot of the skeleton with endpoints (green) and junctions (red) marked."""
-    plt.figure(figsize=(8, 7))
+    """Saves a clean plot of the skeleton with endpoints (green) and junctions (red) marked."""
+    fig, ax = _create_clean_canvas()
     skel_pts = np.argwhere(skeleton > 0)
     if len(skel_pts) > 0:
-        plt.scatter(
+        ax.scatter(
             skel_pts[:, 1] * scale_factor,
             -skel_pts[:, 0] * scale_factor,
             color="lightgray",
             s=2,
-            label="Medial Axis Skeleton",
         )
-
     ep_coords = [
         (c * scale_factor, -r * scale_factor)
         for nid, (r, c) in nodes.items()
@@ -609,37 +604,28 @@ def plot_junction_classification(skeleton, nodes, node_types, scale_factor, save
         for nid, (r, c) in nodes.items()
         if node_types.get(nid) == "junction"
     ]
-
     if ep_coords:
         ep_arr = np.array(ep_coords)
-        plt.scatter(ep_arr[:, 0], ep_arr[:, 1], color="limegreen", s=28, zorder=4, label="Endpoints (X=1)")
+        ax.scatter(ep_arr[:, 0], ep_arr[:, 1], color="limegreen", s=28, zorder=4)
     if junc_coords:
         j_arr = np.array(junc_coords)
-        plt.scatter(j_arr[:, 0], j_arr[:, 1], color="crimson", s=32, zorder=5, label="Junctions (X>=3)")
+        ax.scatter(j_arr[:, 0], j_arr[:, 1], color="crimson", s=32, zorder=5)
 
-    plt.title(f"Rutovitz Junction Classification ({len(ep_coords)} endpoints, {len(junc_coords)} junctions)")
-    plt.axis("equal")
-    plt.grid(True, alpha=0.3)
-    plt.legend(loc="upper right")
-    plt.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close()
+    _save_clean_canvas(fig, save_path)
     print(f"Saved junction classification plot to '{save_path}'")
 
 
 def plot_graph_snapshot(G, save_path, title="Graph Snapshot"):
-    """Saves a diagnostic plot of a MultiGraph."""
-    plt.figure(figsize=(8, 7))
+    """Saves a clean plot of a MultiGraph with no axes, title, or legend."""
+    fig, ax = _create_clean_canvas()
     for _, _, data in G.edges(data=True):
         pts = data["pts"]
-        plt.plot(pts[:, 0], pts[:, 1], "k-", linewidth=1.5)
+        ax.plot(pts[:, 0], pts[:, 1], "k-", linewidth=1.8)
     for _, attrs in G.nodes(data=True):
         x, y = attrs["pos"]
-        plt.scatter(x, y, color="darkorange", s=22, zorder=5)
-    plt.title(f"{title} ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)")
-    plt.axis("equal")
-    plt.grid(True, alpha=0.3)
-    plt.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close()
+        ax.scatter(x, y, color="darkorange", s=22, zorder=5)
+
+    _save_clean_canvas(fig, save_path)
     print(f"Saved {title.lower()} to '{save_path}'")
 
 
@@ -704,5 +690,4 @@ def build_graph_from_image(
 
     merged_G = merge_nearby_junctions(rdp_G, d_edge_thresh=d_edge_thresh)
     final_G = prune_whiskers_and_noise(merged_G, whisker_thresh=whisker_thresh, min_comp_len=min_comp_len)
-
     return final_G, skeleton, canvas_diag, scale_factor

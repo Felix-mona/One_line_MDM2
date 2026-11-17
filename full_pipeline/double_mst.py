@@ -1,9 +1,10 @@
 """
 Double MST Component Bridging (Sections 2.1.4 & 2.2.1)
-Splits sharp corners and long edges, then connects disconnected sub-graphs into a
-single connected graph using two passes of Kruskal's Minimum Spanning Tree with
-additive perceptual penalties, dynamic bridge-crossing penalties, dynamic parity-aware
-node reuse, exact T-join even-parity pruning, and redundant cycle pruning.
+Splits sharp corners and long edges, then connects disconnected sub-graphs
+into a single connected graph using two passes of Kruskal's Minimum Spanning Tree
+with additive perceptual penalties, dynamic bridge-crossing penalties,
+dynamic parity-aware node reuse, exact T-join even-parity pruning, and redundant
+cycle pruning.
 """
 
 import numpy as np
@@ -14,7 +15,6 @@ import matplotlib.pyplot as plt
 # ==========================================================
 # 1. SHARP CORNER & LONG-EDGE SPLITTING (SECTION 2.1.4)
 # ==========================================================
-
 def split_edges_at_sharp_corners(G, max_turn_angle_deg=65.0):
     """
     Splits edges at sharp corners (deflection >= max_turn_angle_deg) so bridges
@@ -22,7 +22,6 @@ def split_edges_at_sharp_corners(G, max_turn_angle_deg=65.0):
     """
     if max_turn_angle_deg <= 0.0 or max_turn_angle_deg >= 180.0:
         return G.copy()
-
     H = G.copy()
     next_id = max(H.nodes, default=-1) + 1
 
@@ -30,7 +29,6 @@ def split_edges_at_sharp_corners(G, max_turn_angle_deg=65.0):
         pts = np.asarray(data["pts"], dtype=float)
         if len(pts) < 3:
             continue
-
         pos_u = np.asarray(H.nodes[u]["pos"], dtype=float)
         pos_v = np.asarray(H.nodes[v]["pos"], dtype=float)
         if u != v and (
@@ -55,7 +53,6 @@ def split_edges_at_sharp_corners(G, max_turn_angle_deg=65.0):
 
         split_idxs.append(len(pts) - 1)
         H.remove_edge(u, v, key=k)
-
         curr_u = u
         for idx in range(len(split_idxs) - 1):
             i0, i1 = split_idxs[idx], split_idxs[idx + 1]
@@ -77,27 +74,22 @@ def subdivide_polyline(pts, max_len):
     pts = np.asarray(pts, dtype=float)
     if len(pts) < 2:
         return [pts]
-
     diffs = np.diff(pts, axis=0)
     seg_lens = np.hypot(diffs[:, 0], diffs[:, 1])
     total_len = float(np.sum(seg_lens))
-
     if total_len <= max_len:
         return [pts]
 
     num_splits = int(np.ceil(total_len / max_len))
     cum_len = np.concatenate(([0.0], np.cumsum(seg_lens)))
     sub_polylines = []
-
     for s in range(num_splits):
         d0 = (s / num_splits) * total_len
         d1 = ((s + 1) / num_splits) * total_len if s < num_splits - 1 else total_len
-
         x0 = float(np.interp(d0, cum_len, pts[:, 0]))
         y0 = float(np.interp(d0, cum_len, pts[:, 1]))
         x1 = float(np.interp(d1, cum_len, pts[:, 0]))
         y1 = float(np.interp(d1, cum_len, pts[:, 1]))
-
         mask = (cum_len > d0 + 1e-6) & (cum_len < d1 - 1e-6)
         piece = np.vstack(([[x0, y0]], pts[mask], [[x1, y1]]))
         sub_polylines.append(piece)
@@ -110,7 +102,6 @@ def split_long_edges(G, max_edge_len):
     new_G = nx.MultiGraph()
     for n, attrs in G.nodes(data=True):
         new_G.add_node(n, **attrs)
-
     next_id = max(G.nodes, default=-1) + 1
 
     for u, v, k, data in G.edges(keys=True, data=True):
@@ -135,7 +126,6 @@ def split_long_edges(G, max_edge_len):
                     end_node = next_id
                     next_id += 1
                     new_G.add_node(end_node, pos=piece[-1].copy(), kind="subdivision")
-
                 attrs = dict(data)
                 attrs["pts"] = piece
                 new_G.add_edge(prev_node, end_node, **attrs)
@@ -147,7 +137,6 @@ def split_long_edges(G, max_edge_len):
 # ==========================================================
 # 2. GEOMETRIC INTERSECTION CHECKS
 # ==========================================================
-
 def segments_intersect(p1, p2, p3, p4):
     """Returns True if segment (p1, p2) strictly crosses segment (p3, p4)."""
     if (
@@ -187,7 +176,6 @@ def count_edge_intersections(p_start, p_end, all_segments):
 # ==========================================================
 # 3. DOUBLE MST BRIDGING & PARITY BALANCING (SECTION 2.2.1)
 # ==========================================================
-
 def _node_additive_penalty(
     G,
     n,
@@ -201,7 +189,6 @@ def _node_additive_penalty(
     """
     total_deg = G.degree(n) + incident_bridges
     even_pen = max(0.0, even_degree_penalty - 1.0)
-
     if total_deg == 1:
         return 0.0
     if total_deg % 2 == 1:
@@ -304,8 +291,8 @@ def double_mst_bridging(
     edge_reuse_penalty=100.0,
     comp_reuse_penalty=1.35,
     prune_redundant=True,
-    max_candidates_per_pair=16,
-    top_k_candidates=10,
+    max_candidates_per_pair=32,
+    top_k_candidates=25,
     subdivided_save_path=None,
     mst1_save_path=None,
     mst2_save_path=None,
@@ -318,7 +305,6 @@ def double_mst_bridging(
     """
     G = split_edges_at_sharp_corners(G, max_turn_angle_deg=corner_angle_deg)
     G = split_long_edges(G, max_edge_len=max_edge_len_prop * canvas_diag)
-
     if subdivided_save_path:
         plot_bridged_graph(G, save_path=subdivided_save_path, title="Refined Graph (Corner & Edge Split)")
 
@@ -329,7 +315,6 @@ def double_mst_bridging(
         return G
 
     print(f"Subdivided graph: {G.number_of_nodes()} nodes across {num_comp} disconnected components.")
-
     stroke_segments = []
     for _, _, d in G.edges(data=True):
         pts = np.asarray(d["pts"], dtype=float)
@@ -342,30 +327,29 @@ def double_mst_bridging(
         )
         for n in G.nodes()
     }
-    candidate_bridges = {}
 
+    candidate_bridges = {}
     for i in range(num_comp):
         comp_i = components[i]
         pts_i = np.array([G.nodes[u]["pos"] for u in comp_i], dtype=float)
         pen_i = np.array([node_pen_init[u] for u in comp_i])[:, None]
-        max_per_u = max(2, 12 // len(comp_i))
+        max_per_u = max(4, 24 // len(comp_i))
 
         for j in range(i + 1, num_comp):
             comp_j = components[j]
             pts_j = np.array([G.nodes[v]["pos"] for v in comp_j], dtype=float)
             pen_j = np.array([node_pen_init[v] for v in comp_j])[None, :]
-            max_per_v = max(2, 12 // len(comp_j))
+            max_per_v = max(4, 24 // len(comp_j))
 
             dist_mat = np.hypot(
                 pts_i[:, 0, None] - pts_j[None, :, 0],
                 pts_i[:, 1, None] - pts_j[None, :, 1],
             )
-
             approx_cost = dist_mat * (1.0 + pen_i + pen_j)
             flat_order = np.argsort(approx_cost.ravel())
+
             candidates = []
             u_counts, v_counts = {}, {}
-
             for flat_idx in flat_order:
                 idx_u, idx_v = np.unravel_index(flat_idx, dist_mat.shape)
                 u, v = comp_i[idx_u], comp_j[idx_v]
@@ -382,7 +366,6 @@ def double_mst_bridging(
                     * (1.0 + pen_i[idx_u, 0] + pen_j[0, idx_v])
                     * (1.0 + intersection_penalty * stroke_crossings)
                 )
-
                 candidates.append({
                     "u": u,
                     "v": v,
@@ -414,11 +397,9 @@ def double_mst_bridging(
             for (ci, cj), cand_list in candidate_bridges.items():
                 if dsu[ci] == dsu[cj]:
                     continue
-
                 for cand in cand_list:
                     u, v = cand["u"], cand["v"]
                     pair_key = tuple(sorted((u, v)))
-
                     pu = _node_additive_penalty(
                         G, u, even_degree_penalty, odd_junction_penalty, corner_penalty, current_node_bridges.get(u, 0)
                     )
@@ -426,13 +407,11 @@ def double_mst_bridging(
                         G, v, even_degree_penalty, odd_junction_penalty, corner_penalty, current_node_bridges.get(v, 0)
                     )
                     node_factor = 1.0 + pu + pv
-
                     bridge_crossings = count_edge_intersections(
                         cand["pos_u"], cand["pos_v"], current_bridge_segs
                     )
                     total_crossings = cand["stroke_crossings"] + bridge_crossings
                     cross_factor = 1.0 + intersection_penalty * total_crossings
-
                     cost = cand["dist"] * node_factor * cross_factor
 
                     if is_pass2:
@@ -448,7 +427,6 @@ def double_mst_bridging(
 
             if best_cand is None:
                 break
-
             dsu.union(best_ci, best_cj)
             selected.append(best_cand)
             current_bridge_segs.append((best_cand["pos_u"], best_cand["pos_v"]))
@@ -468,7 +446,6 @@ def double_mst_bridging(
     for b in mst1_bridges:
         b["pass"] = "mst1"
     print(f"MST Pass 1 selected {len(mst1_bridges)} primary bridges.")
-
     if mst1_save_path:
         g_p1 = _inject_bridges_copy(G, mst1_bridges, pass_tag="mst1")
         plot_bridged_graph(g_p1, save_path=mst1_save_path, title="MST Pass 1 (Primary Bridges)")
@@ -488,7 +465,6 @@ def double_mst_bridging(
     for b in mst2_bridges:
         b["pass"] = "mst2"
     print(f"MST Pass 2 selected {len(mst2_bridges)} candidate return bridges.")
-
     if mst2_save_path:
         g_p2 = _inject_bridges_copy(G, mst1_bridges + mst2_bridges, pass_tag="mst2")
         plot_bridged_graph(g_p2, save_path=mst2_save_path, title="MST Pass 1 + Pass 2 (Unpruned)")
@@ -498,8 +474,8 @@ def double_mst_bridging(
     for b in mst1_bridges:
         comp_deg_1[b["ci"]] += 1
         comp_deg_1[b["cj"]] += 1
-
     odd_set = {c for c, d in comp_deg_1.items() if d % 2 == 1}
+
     tree_2 = nx.Graph()
     tree_2.add_nodes_from(range(num_comp))
     for b in mst2_bridges:
@@ -529,7 +505,6 @@ def double_mst_bridging(
     for b in final_bridges:
         comp_degrees[b["ci"]] += 1
         comp_degrees[b["cj"]] += 1
-
     print(f"After parity & redundancy pruning: {len(final_bridges)} total bridges retained.")
     print(f"Bridge degrees per component (all even): {list(comp_degrees.values())}")
 
@@ -546,7 +521,6 @@ def double_mst_bridging(
             bridge=True,
             bridge_pass=b.get("pass", "mst1"),
         )
-
     print(f"Final bridged graph connected: {nx.is_connected(bridged_G)}")
     return bridged_G
 
@@ -554,7 +528,6 @@ def double_mst_bridging(
 # ==========================================================
 # 4. SAVING VISUALISATION HELPER
 # ==========================================================
-
 def _inject_bridges_copy(G, bridge_list, pass_tag="mst1"):
     """Returns a copy of G with the given bridge list injected for plotting."""
     H = G.copy()
@@ -573,31 +546,27 @@ def _inject_bridges_copy(G, bridge_list, pass_tag="mst1"):
 
 
 def plot_bridged_graph(G, save_path="bridged_graph.png", title="Double MST Bridged Graph"):
-    """Saves a plot of the bridged graph (black = strokes, cyan = Pass 1, magenta = Pass 2)."""
-    plt.figure(figsize=(9, 8))
+    """Saves a clean plot of the bridged graph (black = strokes, cyan = Pass 1, magenta = Pass 2)."""
+    fig = plt.figure(figsize=(10, 10), facecolor="white")
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("white")
 
     for u, v, k, data in G.edges(keys=True, data=True):
         pts = np.asarray(data["pts"], dtype=float)
         if data.get("bridge", False):
             if data.get("bridge_pass") == "mst2":
-                plt.plot(pts[:, 0], pts[:, 1], "m--", linewidth=2.2, label="MST Pass 2 Bridge", zorder=4)
+                ax.plot(pts[:, 0], pts[:, 1], "m--", linewidth=2.2, zorder=4)
             else:
-                plt.plot(pts[:, 0], pts[:, 1], "c--", linewidth=2.2, label="MST Pass 1 Bridge", zorder=4)
+                ax.plot(pts[:, 0], pts[:, 1], "c--", linewidth=2.2, zorder=4)
         else:
-            plt.plot(pts[:, 0], pts[:, 1], "k-", linewidth=1.5, zorder=2)
+            ax.plot(pts[:, 0], pts[:, 1], "k-", linewidth=1.8, zorder=2)
 
     for n, data in G.nodes(data=True):
         pos = data["pos"]
-        plt.scatter(pos[0], pos[1], color="royalblue", s=18, zorder=5)
+        ax.scatter(pos[0], pos[1], color="royalblue", s=20, zorder=5)
 
-    handles, labels = plt.gca().get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    if by_label:
-        plt.legend(by_label.values(), by_label.keys(), loc="upper right")
-
-    plt.title(title)
-    plt.axis("equal")
-    plt.grid(True, alpha=0.3)
-    plt.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close()
+    ax.set_aspect("equal")
+    ax.axis("off")
+    plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.1, facecolor="white")
+    plt.close(fig)
     print(f"Saved bridged graph plot to '{save_path}'")

@@ -1,3 +1,4 @@
+
 """
 Metric.py
 Fast O(N log N) cKDTree Hausdorff Accuracy and scale-invariant Turning-Angle
@@ -20,28 +21,22 @@ def gather_lowest_metric(coefficients, max_frequency_cutoff, samples, alpha_beta
     """Evaluates (k, alpha, beta) combinations across `samples` frequency cutoffs."""
     if original_points is None:
         original_points = fourier.inverse_fourier_descriptors(coefficients)
-
     frequencies = np.unique(np.linspace(1, max_frequency_cutoff, int(samples), dtype=int))
     combination_per_freq = []
-
     for k in frequencies:
         k = int(k)
         min_loss = float("inf")
         minimum_combination = []
         kfiltered = fourier.filter_coeffs(coefficients, k)
         temp_ifd = fourier.inverse_fourier_descriptors(kfiltered)
-
         temp_accuracy, _ = calc_metric(temp_ifd, original_points, "accuracy")
         temp_smoothness = calc_metric(temp_ifd, original_points, "smoothness")
-
         for alpha, beta in alpha_beta_pairs:
             temp_loss = Loss(temp_accuracy, temp_smoothness, alpha=alpha, beta=beta)
             if temp_loss < min_loss:
                 min_loss = temp_loss
                 minimum_combination = [k, alpha, beta]
-
         combination_per_freq.append(minimum_combination)
-
     return combination_per_freq
 
 
@@ -58,7 +53,6 @@ def calc_metric(new_image, old_image, mtype=None, tree_old=None):
     if mtype in ("accuracy", "Accuracy"):
         A = np.column_stack((np.real(old_image), np.imag(old_image)))
         B = np.column_stack((np.real(new_image), np.imag(new_image)))
-
         if tree_old is None:
             tree_old = cKDTree(A)
         tree_new = cKDTree(B)
@@ -87,7 +81,6 @@ def calc_metric(new_image, old_image, mtype=None, tree_old=None):
         both_real_ptp = max(np.ptp(A[:, 0]), np.ptp(B[:, 0]))
         both_imag_ptp = max(np.ptp(A[:, 1]), np.ptp(B[:, 1]))
         scale = float(np.hypot(both_real_ptp, both_imag_ptp))
-
         accuracy = float(d / scale) if scale > 0 else 0.0
         index = (point1, point2, direction)
         return accuracy, index
@@ -96,14 +89,11 @@ def calc_metric(new_image, old_image, mtype=None, tree_old=None):
         A_coords = np.column_stack((np.real(new_image), np.imag(new_image)))
         # Normalise step stride to ~1000 effective segments so Smoothness is invariant to N_SAMPLES
         stride = max(1, len(A_coords) // 1000)
-
         B_coords = np.roll(A_coords, stride, axis=0)
         C_coords = np.roll(A_coords, -stride, axis=0)
-
         c = calculate_distances(A_coords, B_coords)
         b = calculate_distances(A_coords, C_coords)
         a = calculate_distances(B_coords, C_coords)
-
         denom = np.maximum(2.0 * b * c, 1e-12)
         cos_angle = np.clip((b**2 + c**2 - a**2) / denom, -1.0, 1.0)
         angle = np.arccos(cos_angle)

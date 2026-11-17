@@ -1,7 +1,6 @@
 """
 route_mapping.py
-Chinese Postman Routing, Turn-Penalised Eulerian Circuit Generation,
-and Pre-Fourier Path Descriptor Extraction (Sections 2.2.2 - 2.3).
+Chinese Postman Routing and Fleury + Minimum-Angle-Deflection Eulerian Circuit Generation.
 """
 
 import networkx as nx
@@ -10,141 +9,134 @@ import matplotlib.pyplot as plt
 
 
 # ==========================================================
-# GEOMETRY & TANGENT FUNCTIONS
+# PARAMETERS
 # ==========================================================
+# ALPHA is no longer used for routing. It is only used to
+# report a weighted cost for the final route.
+ALPHA = 0
 
+BETA = 60     # (unused) Duplicated-edge preference (degrees)
+GAMMA = 1000  # (unused) Bridge penalty
+
+
+# ==========================================================
+# GEOMETRY FUNCTIONS
+# ==========================================================
 def compute_polyline_length(pts):
-    pts = np.asarray(pts, dtype=float)
-    if len(pts) < 2:
-        return 0.0
-    return float(np.sum(np.linalg.norm(pts[1:] - pts[:-1], axis=1)))
-
-
-def _initial_tangent(pts):
-    """Unit tangent vector in the direction of travel at the start of an edge polyline."""
-    pts = np.asarray(pts, dtype=float)
-    for i in range(1, len(pts)):
-        vec = pts[i] - pts[0]
-        norm = np.linalg.norm(vec)
-        if norm > 1e-9:
-            return vec / norm
-    return np.array([1.0, 0.0])
-
-
-def _terminal_tangent(pts):
-    """Unit tangent vector in the direction of travel at the end of an edge polyline."""
-    pts = np.asarray(pts, dtype=float)
-    for i in range(len(pts) - 2, -1, -1):
-        vec = pts[-1] - pts[i]
-        norm = np.linalg.norm(vec)
-        if norm > 1e-9:
-            return vec / norm
-    return np.array([1.0, 0.0])
-
-
-def orient_edge_pts(E, u, v, pts, prev_tangent=None):
-    """
-    Returns `pts` oriented from node u towards node v.
-    For self-loops (u == v), if `prev_tangent` is provided, chooses the loop
-    orientation that minimises the entry turning angle.
-    """
-    pts = np.asarray(pts, dtype=float)
-    if u == v:
-        if prev_tangent is not None and len(pts) >= 2:
-            tan_fwd = _initial_tangent(pts)
-            tan_rev = _initial_tangent(pts[::-1])
-            if angle_between(prev_tangent, tan_rev) < angle_between(prev_tangent, tan_fwd):
-                return pts[::-1].copy()
-        return pts.copy()
-
-    pos_u = np.asarray(E.nodes[u]["pos"], dtype=float)
-    pos_v = np.asarray(E.nodes[v]["pos"], dtype=float)
-    d_fwd = np.linalg.norm(pts[0] - pos_u) + np.linalg.norm(pts[-1] - pos_v)
-    d_rev = np.linalg.norm(pts[-1] - pos_u) + np.linalg.norm(pts[0] - pos_v)
-    return pts[::-1].copy() if d_rev < d_fwd else pts.copy()
+    return np.sum(
+        np.linalg.norm(
+            pts[1:] - pts[:-1],
+            axis=1
+        )
+    )
 
 
 def edge_direction(pts):
-    """Overall chord direction from start to end of `pts`."""
     vec = pts[-1] - pts[0]
     norm = np.linalg.norm(vec)
+
     if norm < 1e-12:
-        return _initial_tangent(pts)
+        return np.array([1.0, 0.0])
+
     return vec / norm
 
 
 def angle_between(v1, v2):
-    """ Unsigned deflection angle in radians [0, pi] between vectors v1 and v2. """
-    n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
+    n1 = np.linalg.norm(v1)
+    n2 = np.linalg.norm(v2)
+
     if n1 < 1e-12 or n2 < 1e-12:
-        return 0.0
-    dot = np.clip(np.dot(v1 / n1, v2 / n2), -1.0, 1.0)
-    return float(np.arccos(dot))
+        return 0
+
+    v1 = v1 / n1
+    v2 = v2 / n2
+
+    dot = np.clip(
+        np.dot(v1, v2),
+        -1.0,
+        1.0
+    )
+
+    return np.arccos(dot)
+
+
+def traversal_direction(pts, current_pos):
+    d1 = np.linalg.norm(pts[0] - current_pos)
+    d2 = np.linalg.norm(pts[-1] - current_pos)
+
+    if d2 < d1:
+        pts = pts[::-1]
+
+    return edge_direction(pts)
 
 
 # ==========================================================
-# ROUTE QUALITY & ANGULAR DESCRIPTOR ANALYSIS
+# ROUTE METRICS
 # ==========================================================
+def compute_angle_weighted_cost(
+    distance,
+    total_angle,
+    alpha=ALPHA
+):
+    theta = np.radians(total_angle)
+
+    return (
+        distance *
+        (
+            1 +
+            alpha * np.sin(theta / 2)
+        )
+    )
+
 
 def compute_total_turn_angle(E, route):
-    """
-    Computes cumulative exterior turning angle (in degrees) across all consecutive
-    edge transitions in the Eulerian circuit using true terminal and initial tangents.
-    """
-    if len(route) < 2:
-        return 0.0
-
     total_angle = 0.0
-    prev_tan = None
+    previous_dir = None
 
-    # Orient first edge
-    u0, v0, k0 = route[0]
-    pts0 = orient_edge_pts(E, u0, v0, E[u0][v0][k0]["pts"])
-    prev_tan = _terminal_tangent(pts0)
+    for u, v, k in route:
+        pts = E[u][v][k]["pts"]
 
-    for i in range(1, len(route)):
-        u, v, k = route[i]
-        pts = orient_edge_pts(E, u, v, E[u][v][k]["pts"], prev_tangent=prev_tan)
-        init_tan = _initial_tangent(pts)
-        total_angle += np.degrees(angle_between(prev_tan, init_tan))
-        prev_tan = _terminal_tangent(pts)
+        direction = traversal_direction(
+            pts,
+            E.nodes[u]["pos"]
+        )
 
-    return float(total_angle)
+        if previous_dir is not None:
+            total_angle += np.degrees(
+                angle_between(
+                    previous_dir,
+                    direction
+                )
+            )
+
+        previous_dir = direction
+
+    return total_angle
 
 
 def compute_polyline_turn_angles(polyline):
     """
     Computes exterior deflection angles Delta_theta_i in radians [0, pi]
-    at every interior vertex of the stitched RDP polyline.
-    Ignores zero-length steps.
+    at every interior vertex of the stitched polyline.
     """
     pts = np.asarray(polyline, dtype=float)
     if len(pts) < 3:
         return np.zeros(1, dtype=float)
-
     diffs = np.diff(pts, axis=0)
     seg_lens = np.hypot(diffs[:, 0], diffs[:, 1])
     valid_vecs = diffs[seg_lens > 1e-9]
     valid_lens = seg_lens[seg_lens > 1e-9]
-
     if len(valid_vecs) < 2:
         return np.zeros(1, dtype=float)
-
     unit_vecs = valid_vecs / valid_lens[:, None]
     dots = np.clip(np.sum(unit_vecs[:-1] * unit_vecs[1:], axis=1), -1.0, 1.0)
-    return np.arccos(dots)  # Exterior deflection angle: 0 = straight, pi = 180-deg U-turn
+    return np.arccos(dots)
 
 
 def compute_route_descriptors(E, route, polyline, canvas_diag=None):
     """
     Computes scale-invariant geometric, topological, and angular descriptors of
-    the Eulerian route prior to Fourier reconstruction:
-      - doubled_path_prop: L_duplicated / L_total (proportion of path doubled up)
-      - mst_bridge_len_prop: L_bridges / L_total (proportion of path on MST bridges)
-      - tortuosity_len_to_diag: L_total / D (normalised path length)
-      - rms_vertex_turn_norm: RMS exterior turning angle across RDP vertices normalised to [0, 1]
-      - mean_junction_turn_norm: Mean turning angle at route junctions normalised to [0, 1]
-      - acute_turn_fraction: Fraction of polyline vertex turns >= 60 degrees
+    the Eulerian route for dataset generation and analysis.
     """
     total_len = 0.0
     duplicated_len = 0.0
@@ -153,9 +145,8 @@ def compute_route_descriptors(E, route, polyline, canvas_diag=None):
 
     for u, v, k in route:
         edge_data = E[u][v][k]
-        seg_len = compute_polyline_length(edge_data["pts"])
+        seg_len = float(compute_polyline_length(edge_data["pts"]))
         total_len += seg_len
-
         if edge_data.get("duplicated", False):
             duplicated_len += seg_len
         elif edge_data.get("bridge", False):
@@ -167,7 +158,6 @@ def compute_route_descriptors(E, route, polyline, canvas_diag=None):
     doubled_path_prop = duplicated_len / safe_total_len
     mst_bridge_len_prop = bridge_len / safe_total_len
 
-    # Estimate canvas diagonal from polyline bounding box if not passed explicitly
     if canvas_diag is None or canvas_diag <= 0:
         span_x = float(np.ptp(polyline[:, 0])) if len(polyline) > 0 else 1.0
         span_y = float(np.ptp(polyline[:, 1])) if len(polyline) > 0 else 1.0
@@ -175,15 +165,14 @@ def compute_route_descriptors(E, route, polyline, canvas_diag=None):
 
     tortuosity_len_to_diag = total_len / max(float(canvas_diag), 1e-6)
 
-    # Angular metrics across both route junctions and all stitched RDP vertices
-    total_junction_turn_deg = compute_total_turn_angle(E, route)
+    total_junction_turn_deg = float(compute_total_turn_angle(E, route))
     mean_junction_turn_deg = total_junction_turn_deg / max(1, len(route))
     mean_junction_turn_norm = mean_junction_turn_deg / 180.0
 
     vertex_turns_rad = compute_polyline_turn_angles(polyline)
     rms_vertex_turn_rad = float(np.sqrt(np.mean(vertex_turns_rad ** 2)))
     rms_vertex_turn_deg = float(np.degrees(rms_vertex_turn_rad))
-    rms_vertex_turn_norm = rms_vertex_turn_rad / np.pi  # In [0, 1]
+    rms_vertex_turn_norm = rms_vertex_turn_rad / np.pi
     acute_turn_fraction = float(np.mean(np.degrees(vertex_turns_rad) >= 60.0))
 
     return {
@@ -206,281 +195,524 @@ def compute_route_descriptors(E, route, polyline, canvas_diag=None):
 # ==========================================================
 # CPP FUNCTIONS
 # ==========================================================
-
 def build_cpp_graph(final_graph):
     G = nx.MultiGraph()
+
     for n, attrs in final_graph.nodes(data=True):
         G.add_node(n, **attrs)
 
-    for u, v, k, data in final_graph.edges(keys=True, data=True):
+    for u, v, k, data in final_graph.edges(
+        keys=True,
+        data=True
+    ):
         attrs = dict(data)
-        attrs["weight"] = max(compute_polyline_length(data["pts"]), 1e-6)
-        G.add_edge(u, v, key=k, **attrs)
+
+        attrs["weight"] = compute_polyline_length(
+            data["pts"]
+        )
+
+        G.add_edge(
+            u,
+            v,
+            key=k,
+            **attrs
+        )
 
     return G
 
 
 def find_odd_nodes(G):
-    return [n for n in G.nodes if G.degree(n) % 2 == 1]
+    return [
+        n
+        for n in G.nodes
+        if G.degree(n) % 2 == 1
+    ]
 
 
-def compute_odd_node_shortest_paths(G, odd_nodes):
+# ==========================================================
+# SHORTEST PATHS (DISTANCE ONLY)
+# ==========================================================
+def compute_odd_node_shortest_paths(
+    G,
+    odd_nodes
+):
     shortest = {}
+
     for i, u in enumerate(odd_nodes):
-        lengths, paths = nx.single_source_dijkstra(G, source=u, weight="weight")
-        for v in odd_nodes[i + 1 :]:
-            if v in lengths:
-                shortest[(u, v)] = {"distance": lengths[v], "path": paths[v]}
+        for v in odd_nodes[i + 1:]:
+            path = nx.dijkstra_path(
+                G,
+                u,
+                v,
+                weight="weight"
+            )
+
+            distance = nx.dijkstra_path_length(
+                G,
+                u,
+                v,
+                weight="weight"
+            )
+
+            shortest[(u, v)] = {
+                "distance": distance,
+                "path": path
+            }
+
     return shortest
 
 
-def minimum_weight_matching(odd_nodes, shortest):
+# ==========================================================
+# MINIMUM WEIGHT MATCHING (DISTANCE ONLY)
+# ==========================================================
+def minimum_weight_matching(
+    odd_nodes,
+    shortest
+):
     matching_graph = nx.Graph()
+
     for (u, v), info in shortest.items():
-        matching_graph.add_edge(u, v, weight=-info["distance"])
-    return nx.max_weight_matching(matching_graph, maxcardinality=True)
+        matching_graph.add_edge(
+            u,
+            v,
+            weight=-info["distance"]
+        )
+
+    return nx.max_weight_matching(
+        matching_graph,
+        maxcardinality=True
+    )
 
 
-def eulerise_graph(G, matching, shortest):
+# ==========================================================
+# EULERISE GRAPH
+# ==========================================================
+def eulerise_graph(
+    G,
+    matching,
+    shortest
+):
     E = G.copy()
+
     for u, v in matching:
-        lookup = (u, v) if (u, v) in shortest else (v, u)
+        lookup = (u, v)
+
+        if lookup not in shortest:
+            lookup = (v, u)
+
         path = shortest[lookup]["path"]
 
-        for a, b in zip(path[:-1], path[1:]):
-            edge_data = min(E.get_edge_data(a, b).values(), key=lambda d: d["weight"])
+        for a, b in zip(
+            path[:-1],
+            path[1:]
+        ):
+            edge_data = min(
+                E.get_edge_data(a, b).values(),
+                key=lambda d: d["weight"]
+            )
+
             duplicated_attrs = dict(edge_data)
+
             duplicated_attrs["duplicated"] = True
-            E.add_edge(a, b, **duplicated_attrs)
+
+            E.add_edge(
+                a,
+                b,
+                **duplicated_attrs
+            )
 
     return E
 
 
 # ==========================================================
-# TURN-PENALISED EULER ROUTE & POLYLINE BUILDING
+# EULER ROUTE (FLEURY + MINIMUM ANGLE DEFLECTION)
 # ==========================================================
-
-def build_euler_route(E, penalise_turns=True):
+def build_euler_route(E, start=None):
     """
-    Extracts an Eulerian circuit from multigraph E.
-    When penalise_turns=True, executes a Turn-Minimising Hierholzer algorithm
-    that greedily chooses the unvisited outgoing edge with minimum angular
-    deflection at every junction and penalises immediate 180-deg U-turns back
-    onto parallel duplicated edges whenever another branch is available.
+    Walk every edge of the Eulerian multigraph E exactly once.
+
+    At each node, choose the untraversed edge that gives the
+    smallest turn relative to the previous direction of travel.
+    Bridges (in the remaining graph) are avoided unless they are
+    the only option, which guarantees no edge is stranded.
     """
-    if not penalise_turns or E.number_of_edges() == 0:
-        return list(nx.eulerian_circuit(E, keys=True))
+    R = E.copy()  # remaining (untraversed) edges
 
-    unused_adj = {n: [] for n in E.nodes()}
-    unused_set = set()
-    for u, v, k in E.edges(keys=True):
-        eid = (min(u, v), max(u, v), k)
-        unused_set.add(eid)
-        unused_adj[u].append((v, k, eid))
-        if u != v:
-            unused_adj[v].append((u, k, eid))
+    if start is None:
+        start = min(E.nodes)
 
-    start_node = next(iter(E.nodes()))
-    # Stack stores (current_node, incoming_edge_triple, incoming_terminal_tangent)
-    stack = [(start_node, None, None)]
-    circuit = []
+    current = start
+    previous_dir = None
+    route = []
 
-    while stack:
-        u, in_edge, in_tan = stack[-1]
-        candidates = [item for item in unused_adj[u] if item[2] in unused_set]
+    def is_bridge(u, v, k):
+        # Only one edge left at u: forced move, not a problem
+        if R.degree(u) == 1:
+            return False
 
-        if not candidates:
-            if in_edge is not None:
-                circuit.append(in_edge)
-            stack.pop()
-        else:
-            if in_tan is None or len(candidates) == 1:
-                best_v, best_k, best_eid = candidates[0]
-                pts_out = orient_edge_pts(
-                    E, u, best_v, E[u][best_v][best_k]["pts"], prev_tangent=in_tan
-                )
+        data = dict(R[u][v][k])
+
+        R.remove_edge(u, v, key=k)
+        connected = nx.has_path(R, u, v)
+        R.add_edge(u, v, key=k, **data)
+
+        return not connected
+
+    while R.number_of_edges() > 0:
+        candidates = []
+
+        for _, nbr, k in R.edges(current, keys=True):
+            pts = R[current][nbr][k]["pts"]
+
+            direction = traversal_direction(
+                pts,
+                E.nodes[current]["pos"]
+            )
+
+            if previous_dir is None:
+                deflection = 0.0
             else:
-                best_cost = float("inf")
-                best_v, best_k, best_eid, pts_out = None, None, None, None
-                prev_u = in_edge[0]
+                deflection = angle_between(
+                    previous_dir,
+                    direction
+                )
 
-                for cand_v, cand_k, cand_eid in candidates:
-                    c_pts = orient_edge_pts(
-                        E, u, cand_v, E[u][cand_v][cand_k]["pts"], prev_tangent=in_tan
-                    )
-                    out_tan = _initial_tangent(c_pts)
-                    turn_rad = angle_between(in_tan, out_tan)  # in [0, pi]
+            candidates.append(
+                (deflection, nbr, k, direction)
+            )
 
-                    # Penalise immediate 180-degree U-turns onto parallel edges
-                    if cand_v == prev_u and np.degrees(turn_rad) > 150.0:
-                        turn_rad += np.pi
+        safe = [
+            c for c in candidates
+            if not is_bridge(current, c[1], c[2])
+        ]
 
-                    if turn_rad < best_cost:
-                        best_cost = turn_rad
-                        best_v, best_k, best_eid = cand_v, cand_k, cand_eid
-                        pts_out = c_pts
+        pool = safe if safe else candidates
 
-            unused_set.remove(best_eid)
-            next_in_tan = _terminal_tangent(pts_out)
-            stack.append((best_v, (u, best_v, best_k), next_in_tan))
+        deflection, nbr, k, direction = min(
+            pool,
+            key=lambda c: c[0]
+        )
 
-    return circuit[::-1]
+        route.append((current, nbr, k))
+
+        R.remove_edge(current, nbr, key=k)
+
+        previous_dir = direction
+        current = nbr
+
+    return route
 
 
-def route_to_polyline(E, route):
+# ==========================================================
+# POLYLINE BUILDING
+# ==========================================================
+def route_to_polyline(
+    E,
+    route
+):
     drawing_pts = []
-    prev_tan = None
 
     for u, v, k in route:
-        pts = orient_edge_pts(E, u, v, E[u][v][k]["pts"], prev_tangent=prev_tan)
+        pts = E[u][v][k]["pts"].copy()
 
         if len(drawing_pts) == 0:
+            if np.linalg.norm(
+                pts[-1] - E.nodes[u]["pos"]
+            ) < np.linalg.norm(
+                pts[0] - E.nodes[u]["pos"]
+            ):
+                pts = pts[::-1]
+
             drawing_pts.extend(pts)
-            prev_tan = _terminal_tangent(pts)
+
             continue
 
-        # Ensure spatial continuity for self-loops (u == v)
-        if np.linalg.norm(drawing_pts[-1] - pts[-1]) < np.linalg.norm(drawing_pts[-1] - pts[0]):
+        start_dist = np.linalg.norm(
+            drawing_pts[-1] - pts[0]
+        )
+
+        end_dist = np.linalg.norm(
+            drawing_pts[-1] - pts[-1]
+        )
+
+        if end_dist < start_dist:
             pts = pts[::-1]
 
-        drawing_pts.extend(pts[1:])
-        prev_tan = _terminal_tangent(pts)
+        drawing_pts.extend(
+            pts[1:]
+        )
 
-    return np.array(drawing_pts, dtype=float)
+    return np.array(drawing_pts)
 
 
-def chinese_postman(final_graph, penalise_turns=True, canvas_diag=None):
+# ==========================================================
+# CHINESE POSTMAN
+# ==========================================================
+def chinese_postman(final_graph):
     print("Building weighted graph...")
+
     G = build_cpp_graph(final_graph)
+
     odd_nodes = find_odd_nodes(G)
-    print(f"Odd vertices found: {len(odd_nodes)}")
+
+    print(
+        f"Odd vertices found: {len(odd_nodes)}"
+    )
 
     if len(odd_nodes) == 0:
         E = G
     else:
-        print("Finding shortest paths between odd-degree vertices...")
-        shortest = compute_odd_node_shortest_paths(G, odd_nodes)
-        print("Solving minimum-weight perfect matching...")
-        matching = minimum_weight_matching(odd_nodes, shortest)
-        print(f"Matched pairs: {len(matching)}")
+        print("Finding shortest paths (distance only)...")
+
+        shortest = compute_odd_node_shortest_paths(
+            G,
+            odd_nodes
+        )
+
+        for (u, v), info in shortest.items():
+            print(
+                f"Path {u} -> {v}: "
+                f"Length = {info['distance']:.2f}"
+            )
+
+        print("Solving minimum weight matching...")
+
+        matching = minimum_weight_matching(
+            odd_nodes,
+            shortest
+        )
+
+        print(
+            f"Matched pairs: {len(matching)}"
+        )
+
         print("Eulerising graph...")
-        E = eulerise_graph(G, matching, shortest)
 
-    print(f"Computing Euler circuit (penalise_turns={penalise_turns})...")
-    route = build_euler_route(E, penalise_turns=penalise_turns)
-    polyline = route_to_polyline(E, route)
-    descriptors = compute_route_descriptors(E, route, polyline, canvas_diag=canvas_diag)
+        E = eulerise_graph(
+            G,
+            matching,
+            shortest
+        )
 
-    print(
-        f"Route summary: Doubled-up path = {descriptors['doubled_path_prop']*100:.1f}% | "
-        f"MST bridge path = {descriptors['mst_bridge_len_prop']*100:.1f}% | "
-        f"RMS vertex turn = {descriptors['rms_vertex_turn_deg']:.1f} deg"
+    print("Computing angle-guided Euler circuit...")
+
+    route = build_euler_route(E)
+
+    polyline = route_to_polyline(
+        E,
+        route
     )
 
     return {
         "euler_graph": E,
         "route": route,
-        "polyline": polyline,
-        "descriptors": descriptors,
+        "polyline": polyline
     }
 
 
 # ==========================================================
-# SAVING PLOTS TO DISK
+# SAVING PLOTS TO DISK (UNIFORM CLEAN STYLE)
 # ==========================================================
-
 def plot_original_graph(G, save_path="original_graph.png"):
-    plt.figure(figsize=(8, 7))
+    fig = plt.figure(figsize=(10, 10), facecolor="white")
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("white")
+
     for _, _, data in G.edges(data=True):
         pts = data["pts"]
-        plt.plot(pts[:, 0], pts[:, 1], "k-", linewidth=1.8)
-
+        ax.plot(pts[:, 0], pts[:, 1], "k-", linewidth=1.8)
     for n, attrs in G.nodes(data=True):
         x, y = attrs["pos"]
-        plt.scatter(x, y, color="royalblue", s=30, zorder=5)
+        ax.scatter(x, y, color="royalblue", s=24, zorder=5)
 
-    plt.title(f"Extracted Base Graph ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)")
-    plt.axis("equal")
-    plt.grid(True, alpha=0.3)
-    plt.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close()
+    ax.set_aspect("equal")
+    ax.axis("off")
+    plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.1, facecolor="white")
+    plt.close(fig)
     print(f"Saved original graph plot to '{save_path}'")
 
 
 def plot_eulerised_graph(E, save_path="eulerised_graph.png"):
-    plt.figure(figsize=(8, 7))
+    fig = plt.figure(figsize=(10, 10), facecolor="white")
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("white")
+
     for _, _, _, data in E.edges(keys=True, data=True):
         pts = data["pts"]
         if data.get("duplicated", False):
-            plt.plot(pts[:, 0], pts[:, 1], color="crimson", linewidth=3.0, alpha=0.85, label="CPP Duplicated")
+            ax.plot(pts[:, 0], pts[:, 1], color="crimson", linewidth=2.8, alpha=0.85)
         elif data.get("bridge", False):
-            plt.plot(pts[:, 0], pts[:, 1], "c--", linewidth=1.8, label="MST Bridge")
+            ax.plot(pts[:, 0], pts[:, 1], "c--", linewidth=1.8)
         else:
-            plt.plot(pts[:, 0], pts[:, 1], color="black", linewidth=1.5)
-
+            ax.plot(pts[:, 0], pts[:, 1], color="black", linewidth=1.8)
     for n, attrs in E.nodes(data=True):
         x, y = attrs["pos"]
-        plt.scatter(x, y, color="royalblue", s=20, zorder=5)
+        ax.scatter(x, y, color="royalblue", s=20, zorder=5)
 
-    handles, labels = plt.gca().get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    if by_label:
-        plt.legend(by_label.values(), by_label.keys(), loc="upper right")
-
-    plt.title("Eulerised Graph (Red = CPP Duplicated Edges)")
-    plt.axis("equal")
-    plt.grid(True, alpha=0.3)
-    plt.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close()
+    ax.set_aspect("equal")
+    ax.axis("off")
+    plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.1, facecolor="white")
+    plt.close(fig)
     print(f"Saved Eulerised graph plot to '{save_path}'")
 
 
 def plot_route(E, route, save_path="euler_route.png"):
-    plt.figure(figsize=(9, 8))
+    fig = plt.figure(figsize=(10, 10), facecolor="white")
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("white")
+
     cmap = plt.cm.viridis
     N = len(route)
-    prev_tan = None
-
     for i, (u, v, k) in enumerate(route):
-        pts = orient_edge_pts(E, u, v, E[u][v][k]["pts"], prev_tangent=prev_tan)
-        prev_tan = _terminal_tangent(pts)
+        pts = E[u][v][k]["pts"].copy()
+        if np.linalg.norm(pts[-1] - E.nodes[u]["pos"]) < np.linalg.norm(pts[0] - E.nodes[u]["pos"]):
+            pts = pts[::-1]
         colour = cmap(i / max(N, 1))
-        plt.plot(pts[:, 0], pts[:, 1], color=colour, linewidth=2.2)
+        ax.plot(pts[:, 0], pts[:, 1], color=colour, linewidth=2.0, solid_capstyle="round")
 
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=N))
-    plt.colorbar(sm, ax=plt.gca(), fraction=0.03, pad=0.04, label="Step Index in Euler Tour")
-
-    plt.title("Continuous Single-Line Euler Traversal Order")
-    plt.axis("equal")
-    plt.grid(True, alpha=0.3)
-    plt.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close()
+    ax.set_aspect("equal")
+    ax.axis("off")
+    plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.1, facecolor="white")
+    plt.close(fig)
     print(f"Saved Euler route plot to '{save_path}'")
 
 
 # ==========================================================
 # STANDALONE TEST (ONLY RUNS WHEN EXECUTED DIRECTLY)
 # ==========================================================
-
 if __name__ == "__main__":
-    test_G = nx.MultiGraph()
+    final_graph = nx.MultiGraph()
+
     positions = {
-        0: (0, 0), 1: (2, 0), 2: (4, 0), 3: (6, 0),
-        4: (1, 2), 5: (3, 2), 6: (5, 2), 7: (7, 2),
-        8: (0, 4), 9: (2, 4), 10: (4, 4), 11: (6, 4),
+        0: (0, 0),
+        1: (2, 0),
+        2: (4, 0),
+        3: (6, 0),
+        4: (1, 2),
+        5: (3, 2),
+        6: (5, 2),
+        7: (7, 2),
+        8: (0, 4),
+        9: (2, 4),
+        10: (4, 4),
+        11: (6, 4),
     }
+
     for n, pos in positions.items():
-        test_G.add_node(n, pos=np.array(pos, dtype=float))
+        final_graph.add_node(
+            n,
+            pos=np.array(
+                pos,
+                dtype=float
+            )
+        )
 
-    for a, b in [
-        (0, 1), (1, 2), (2, 3), (4, 5), (5, 6), (6, 7),
-        (8, 9), (9, 10), (10, 11), (0, 4), (1, 5), (2, 6),
-        (3, 7), (4, 8), (5, 9), (6, 10), (7, 11),
-    ]:
-        test_G.add_edge(a, b, pts=np.array([positions[a], positions[b]], dtype=float))
+    def add_edge(a, b):
+        pts = np.array([
+            positions[a],
+            positions[b]
+        ], dtype=float)
 
-    res = chinese_postman(test_G, penalise_turns=True)
-    print("Extracted Descriptors:", res["descriptors"])
-    plot_original_graph(test_G, "test_original.png")
-    plot_eulerised_graph(res["euler_graph"], "test_eulerised.png")
-    plot_route(res["euler_graph"], res["route"], "test_route.png")
+        final_graph.add_edge(
+            a,
+            b,
+            pts=pts
+        )
+
+    add_edge(0, 1)
+    add_edge(1, 2)
+    add_edge(2, 3)
+
+    add_edge(4, 5)
+    add_edge(5, 6)
+    add_edge(6, 7)
+
+    add_edge(8, 9)
+    add_edge(9, 10)
+    add_edge(10, 11)
+
+    add_edge(0, 4)
+    add_edge(1, 5)
+    add_edge(2, 6)
+    add_edge(3, 7)
+
+    add_edge(4, 8)
+    add_edge(5, 9)
+    add_edge(6, 10)
+    add_edge(7, 11)
+
+    add_edge(0, 5)
+    add_edge(2, 5)
+    add_edge(2, 7)
+
+    add_edge(4, 9)
+    add_edge(6, 9)
+    add_edge(6, 11)
+
+    result = chinese_postman(
+        final_graph
+    )
+
+    E = result["euler_graph"]
+    route = result["route"]
+
+    print(
+        "\nEuler graph edges:",
+        E.number_of_edges()
+    )
+
+    print(
+        "Route edges:",
+        len(route)
+    )
+
+    print(
+        "Graph Eulerian:",
+        nx.is_eulerian(E)
+    )
+
+    # ----------------------------------------------------------
+    # Completeness checks: every edge used exactly once
+    # ----------------------------------------------------------
+    assert len(route) == E.number_of_edges(),         "Some edges were missed!"
+
+    assert len(
+        {(min(u, v), max(u, v), k) for u, v, k in route}
+    ) == len(route),         "Some edges were traversed more than once!"
+
+    print("All edges traversed exactly once: OK")
+
+    turning_angle = compute_total_turn_angle(
+        E,
+        route
+    )
+
+    total_distance = sum(
+        E[u][v][k]["weight"]
+        for u, v, k in route
+    )
+
+    weighted_route_cost = compute_angle_weighted_cost(
+        total_distance,
+        turning_angle
+    )
+
+    print(
+        f"Total route distance: {total_distance:.2f}"
+    )
+
+    print(
+        f"Total turning angle: {turning_angle:.2f} degrees"
+    )
+
+    print(
+        f"Alpha: {ALPHA}"
+    )
+
+    print(
+        f"Weighted route cost: {weighted_route_cost:.2f}"
+    )
+
+    plot_original_graph(final_graph, "test_original.png")
+    plot_eulerised_graph(E, "test_eulerised.png")
+    plot_route(E, route, "test_route.png")

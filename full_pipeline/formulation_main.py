@@ -1,7 +1,6 @@
 """
 Pipeline runner for graph formulation, Double MST component bridging,
 and Chinese Postman Eulerian route mapping.
-
 Adjust the configuration parameters below and run this script directly.
 """
 
@@ -27,7 +26,6 @@ from route_mapping import (
 # ==========================================================
 # CONFIGURATION & PARAMETERS
 # ==========================================================
-
 # 1. File Input / Output
 IMAGE_PATH              = "images/Sunflower/Sunflower.png"  # Path to input sketch or drawing
 OUTPUT_DIR              = "images/Sunflower"                    # Folder where all plots & polylines are saved
@@ -39,18 +37,18 @@ TARGET_STROKE_WIDTH     = 10                           # Normalised stroke thick
 BINARISE_THRESH         = 128                          # Grayscale binarisation threshold (0-255)
 
 # 3. Decimation & Node Merging (Sections 2.1.3 - 2.1.4)
-RDP_EPSILON_PROP        = 0.001                     # RDP tolerance as a fraction of diagonal D
+RDP_EPSILON_PROP        = 0.001                        # RDP tolerance as a fraction of diagonal D
 D_EUCLID_PROP           = 0.008                        # Spatial node merge radius as fraction of D (0.8%)
 D_EDGE_FACTOR           = 2.5                          # Multiplier on d_euclid for short junction edge merging
 
 # 4. Double MST Component Bridging (Sections 2.1.4 & 2.2.1)
-MAX_EDGE_LEN_PROP       = 0.05                         # Edge subdivision limit as fraction of diagonal D (10%)
-CORNER_SPLIT_ANGLE_DEG  = 65.0                     # Split sharp corners above this turn angle (degrees)
-EVEN_DEGREE_PENALTY     = 5                          # Cost multiplier for untouched even-degree nodes
-ODD_JUNCTION_PENALTY    = 0.5                        # Cost multiplier for odd-degree nodes (and reused nodes turned odd)
-CORNER_PENALTY          = 1                         # Cost multiplier for sharp geometric corner vertices
+MAX_EDGE_LEN_PROP       = 0.05                         # Edge subdivision limit as fraction of diagonal D
+CORNER_SPLIT_ANGLE_DEG  = 65.0                         # Split sharp corners above this turn angle (degrees)
+EVEN_DEGREE_PENALTY     = 5                            # Cost multiplier for untouched even-degree nodes
+ODD_JUNCTION_PENALTY    = 0.5                          # Cost multiplier for odd-degree nodes (and reused nodes turned odd)
+CORNER_PENALTY          = 1                            # Cost multiplier for sharp geometric corner vertices
 INTERSECTION_PENALTY    = 25.0                         # Multiplier penalty per crossed stroke or prior bridge
-EDGE_REUSE_PENALTY      = 10.0                        # Heavy penalty preventing duplicate bridge edges in Pass 2
+EDGE_REUSE_PENALTY      = 10.0                         # Heavy penalty preventing duplicate bridge edges in Pass 2
 COMP_REUSE_PENALTY      = 1.35                         # Penalty for placing a return bridge between the same component pair
 PRUNE_REDUNDANT_BRIDGES = True                         # Prune excess bridge pairs/cycles from components with >= 4 bridges
 
@@ -65,7 +63,6 @@ SAVE_EULER_ROUTE        = True                         # Save 05_euler_route.png
 # ==========================================================
 # PIPELINE EXECUTION
 # ==========================================================
-
 def run_pipeline():
     stem = Path(IMAGE_PATH).stem
     out_dir = Path(OUTPUT_DIR) / stem
@@ -78,9 +75,7 @@ def run_pipeline():
     print("\n" + "=" * 65)
     print("STEP 1: SKELETONISATION & GRAPH FORMULATION")
     print("=" * 65)
-
     skel_path = str(out_dir / f"{stem}_01_skeleton.png") if SAVE_SKELETON_IMAGE else None
-
     base_graph, skeleton, canvas_diag, scale_factor = build_graph_from_image(
         image_path=IMAGE_PATH,
         input_stroke_width=INPUT_STROKE_WIDTH,
@@ -91,9 +86,7 @@ def run_pipeline():
         rdp_epsilon_prop=RDP_EPSILON_PROP,
         skeleton_save_path=skel_path,
     )
-
     print(f"Base graph extracted: {base_graph.number_of_nodes()} nodes, {base_graph.number_of_edges()} edges")
-
     if base_graph.number_of_nodes() == 0 or base_graph.number_of_edges() == 0:
         raise ValueError("Extracted graph is empty. Verify IMAGE_PATH and BINARISE_THRESH.")
 
@@ -106,7 +99,6 @@ def run_pipeline():
     print("\n" + "=" * 65)
     print("STEP 2: DOUBLE MST COMPONENT BRIDGING & PARITY PRUNING")
     print("=" * 65)
-
     bridged_graph = double_mst_bridging(
         G=base_graph,
         canvas_diag=canvas_diag,
@@ -120,7 +112,6 @@ def run_pipeline():
         comp_reuse_penalty=COMP_REUSE_PENALTY,
         prune_redundant=PRUNE_REDUNDANT_BRIDGES,
     )
-
     if not nx.is_connected(bridged_graph):
         raise RuntimeError("Graph could not be connected via MST bridging.")
 
@@ -133,13 +124,12 @@ def run_pipeline():
     print("\n" + "=" * 65)
     print("STEP 3: CHINESE POSTMAN ROUTING & POLYLINES")
     print("=" * 65)
-
     cpp_results = chinese_postman(bridged_graph)
     euler_graph = cpp_results["euler_graph"]
     route       = cpp_results["route"]
     polyline    = cpp_results["polyline"]
-
     turning_angle = compute_total_turn_angle(euler_graph, route)
+
     print(f"\nTraversal complete: {len(route)} traversed edge steps")
     print(f"Stitched continuous polyline: {len(polyline)} coordinate points")
     print(f"Graph is Eulerian: {nx.is_eulerian(euler_graph)}")

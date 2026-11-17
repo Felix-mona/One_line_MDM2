@@ -2,8 +2,8 @@
 full_pipeline.py
 End-to-end pipeline from input raster image to Fourier-reconstructed continuous
 one-line drawing(s). Accepts a single accuracy threshold or a list of accuracy
-thresholds, finds the lowest frequency cutoff K for each, and outputs PNG images
-with both the accuracy threshold and chosen K in the title and filename.
+thresholds, finds the lowest frequency cutoff K for each, and outputs clean
+uniformly styled PNG images with no axes, titles, or legends.
 """
 
 import os
@@ -28,21 +28,21 @@ import Metric as met
 # ==========================================================
 # PLOTTING HELPERS
 # ==========================================================
-
-def plot_polyline_preview(coords, save_path, title="Continuous Polyline", color="black", lw=1.5):
-    """Saves a diagnostic plot of the unfiltered 2D polyline."""
+def plot_polyline_preview(coords, save_path, title="Continuous Polyline", color="black", lw=1.8):
+    """Saves a clean plot of the unfiltered 2D polyline."""
     pts = (
         np.column_stack((np.real(coords), np.imag(coords)))
         if np.iscomplexobj(coords)
         else np.asarray(coords, dtype=float)
     )
-    plt.figure(figsize=(9, 8))
-    plt.plot(pts[:, 0], pts[:, 1], color=color, linewidth=lw)
-    plt.title(title)
-    plt.axis("equal")
-    plt.grid(True, alpha=0.3)
-    plt.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close()
+    fig = plt.figure(figsize=(10, 10), facecolor="white")
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("white")
+    ax.plot(pts[:, 0], pts[:, 1], color=color, linewidth=lw, solid_capstyle="round")
+    ax.set_aspect("equal")
+    ax.axis("off")
+    plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.1, facecolor="white")
+    plt.close(fig)
     print(f"Saved polyline plot to '{save_path}'")
 
 
@@ -53,44 +53,29 @@ def save_labeled_reconstruction_image(
     target_accuracy,
     achieved_accuracy,
     k_val,
-    show_labels_on_image=True,
+    show_labels_on_image=False,
     line_color="black",
     bg_color="white",
     line_width=1.8,
     figsize=(10, 10),
     dpi=300,
 ):
-    """
-    Saves a reconstructed one-line drawing PNG with the Accuracy Threshold
-    and chosen K cutoff in the plot title and legend.
-    """
+    """Saves a clean reconstructed one-line drawing PNG with no axes, title, or legend."""
     fig = plt.figure(figsize=figsize, facecolor=bg_color)
     ax = fig.add_subplot(111)
     ax.set_facecolor(bg_color)
-
     ax.plot(
         coords_xy[:, 0],
         coords_xy[:, 1],
         color=line_color,
         linewidth=line_width,
         solid_capstyle="round",
-        label=f"Chosen K = {k_val} (Achieved Acc = {achieved_accuracy:.4f})",
     )
     ax.set_aspect("equal")
     ax.axis("off")
-
-    if show_labels_on_image:
-        ax.set_title(
-            f"{stem} | Accuracy Threshold: {target_accuracy} | Chosen K = {k_val}",
-            fontsize=18,
-            fontweight="bold",
-            pad=14,
-        )
-        ax.legend(loc="upper right", fontsize=12, frameon=True)
-
     plt.savefig(save_path, dpi=dpi, bbox_inches="tight", pad_inches=0.1, facecolor=bg_color)
     plt.close(fig)
-    print(f"Saved labeled reconstruction (Acc={target_accuracy}, K={k_val}) to '{save_path}'")
+    print(f"Saved reconstruction (Acc={target_accuracy}, K={k_val}) to '{save_path}'")
 
 
 def plot_hausdorff_comparison(
@@ -102,42 +87,23 @@ def plot_hausdorff_comparison(
     selected_k,
     save_path="hausdorff_comparison.png",
 ):
-    """Plots the reconstructed curve over the original path and marks the Hausdorff distance."""
+    """Plots the reconstructed curve over the original path and marks the Hausdorff distance cleanly."""
     idx_orig, idx_recon, _ = hausdorff_index
     pt_orig = (np.real(original_z[idx_orig]), np.imag(original_z[idx_orig]))
     pt_recon = (np.real(reconstructed_z[idx_recon]), np.imag(reconstructed_z[idx_recon]))
 
-    plt.figure(figsize=(9, 8))
-    plt.plot(
-        np.real(original_z),
-        np.imag(original_z),
-        color="lightgray",
-        linewidth=2.0,
-        label="Original Euler Polyline",
-    )
-    plt.plot(
-        np.real(reconstructed_z),
-        np.imag(reconstructed_z),
-        color="royalblue",
-        linewidth=1.6,
-        label=f"Reconstructed (Target Acc={target_accuracy}, K={selected_k})",
-    )
-    plt.plot(pt_orig[0], pt_orig[1], "ro", markersize=7, label="Furthest Point (Original)")
-    plt.plot(pt_recon[0], pt_recon[1], "go", markersize=7, label="Furthest Point (Reconstructed)")
-    plt.plot(
-        [pt_orig[0], pt_recon[0]],
-        [pt_orig[1], pt_recon[1]],
-        "k--",
-        linewidth=1.8,
-        label=f"Hausdorff Distance = {achieved_accuracy:.4f}",
-    )
-
-    plt.title(f"Hausdorff Overlay | Accuracy Threshold: {target_accuracy} | Chosen K = {selected_k}", fontsize=15)
-    plt.axis("equal")
-    plt.axis("off")
-    plt.legend(loc="upper right")
-    plt.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close()
+    fig = plt.figure(figsize=(10, 10), facecolor="white")
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("white")
+    ax.plot(np.real(original_z), np.imag(original_z), color="lightgray", linewidth=2.0)
+    ax.plot(np.real(reconstructed_z), np.imag(reconstructed_z), color="royalblue", linewidth=1.8)
+    ax.plot(pt_orig[0], pt_orig[1], "ro", markersize=7)
+    ax.plot(pt_recon[0], pt_recon[1], "go", markersize=7)
+    ax.plot([pt_orig[0], pt_recon[0]], [pt_orig[1], pt_recon[1]], "k--", linewidth=1.8)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.1, facecolor="white")
+    plt.close(fig)
     print(f"Saved Hausdorff comparison plot to '{save_path}'")
 
 
@@ -149,11 +115,10 @@ def plot_fourier_accuracy_curve(
     num_eval_points=60,
     save_path="fourier_accuracy_curve.png",
 ):
-    """Plots Accuracy and Smoothness over frequency cutoffs K, highlighting the found K values."""
+    """Plots Accuracy and Smoothness curves cleanly with no axes, title, or legend."""
     n = len(coeffs)
     max_cutoff = min(int(max_k) if max_k is not None else (n - 1) // 2, (n - 1) // 2)
     k_values = np.unique(np.linspace(1, max(1, max_cutoff), num_eval_points, dtype=int))
-
     accuracies, smoothnesses = [], []
     for k in k_values:
         filtered = fourier.filter_coeffs(coeffs, int(k))
@@ -163,37 +128,23 @@ def plot_fourier_accuracy_curve(
         accuracies.append(acc)
         smoothnesses.append(smo)
 
-    plt.figure(figsize=(9, 6))
-    plt.plot(k_values, accuracies, "g-", linewidth=2, label="Accuracy (Hausdorff Error)")
-    plt.plot(k_values, smoothnesses, "b-", linewidth=2, label="Smoothness (Angle Roughness)")
-
+    fig = plt.figure(figsize=(10, 10), facecolor="white")
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("white")
+    ax.plot(k_values, accuracies, "g-", linewidth=2.0)
+    ax.plot(k_values, smoothnesses, "b-", linewidth=2.0)
     found_ks = [r["k"] for r in reconstruction_results]
     found_accs = [r["achieved_accuracy"] for r in reconstruction_results]
-    plt.scatter(found_ks, found_accs, color="crimson", s=55, zorder=5, label="Chosen K per Accuracy Threshold")
-
-    for r in reconstruction_results:
-        plt.annotate(
-            f"Acc≤{r['target_accuracy']}\n(K={r['k']})",
-            (r["k"], r["achieved_accuracy"]),
-            textcoords="offset points",
-            xytext=(6, 6),
-            fontsize=9,
-        )
-
-    plt.title("Accuracy & Smoothness vs. Frequency Cutoff (K)")
-    plt.xlabel("Frequency Cutoff K")
-    plt.ylabel("Metric Value [0, 1]")
-    plt.legend(loc="best")
-    plt.grid(True, alpha=0.3)
-    plt.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close()
+    ax.scatter(found_ks, found_accs, color="crimson", s=55, zorder=5)
+    ax.axis("off")
+    plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.1, facecolor="white")
+    plt.close(fig)
     print(f"Saved Fourier accuracy curve to '{save_path}'")
 
 
 # ==========================================================
 # MASTER PIPELINE FUNCTION
 # ==========================================================
-
 def run_oneline_pipeline(
     image_path,
     output_path,
@@ -226,7 +177,7 @@ def run_oneline_pipeline(
     max_candidates_per_pair=16,
     top_k_candidates=10,
     # --- Final Drawing Appearance & Labeling ---
-    show_labels_on_image=True,       # Renders Accuracy Threshold and chosen K in the PNG title
+    show_labels_on_image=False,
     line_color="black",
     bg_color="white",
     line_width=1.8,
@@ -302,7 +253,6 @@ def run_oneline_pipeline(
     print("\n" + "=" * 65)
     print("STAGE 1 & 2: SKELETONISATION & GRAPH FORMULATION")
     print("=" * 65)
-
     bin_path   = str(inter_dir / f"{stem}_01_binary_mask.png") if save_binary_mask else None
     skel_path  = str(inter_dir / f"{stem}_02_skeleton.png") if save_skeleton else None
     junc_path  = str(inter_dir / f"{stem}_03_junction_classification.png") if save_junction_classification else None
@@ -351,7 +301,6 @@ def run_oneline_pipeline(
     print("\n" + "=" * 65)
     print("STAGE 3: DOUBLE MST COMPONENT BRIDGING & PARITY PRUNING")
     print("=" * 65)
-
     subdiv_path = str(inter_dir / f"{stem}_07_subdivided_graph.png") if save_subdivided_graph else None
     mst1_path   = str(inter_dir / f"{stem}_08_mst1_bridges.png") if save_mst1_graph else None
     mst2_path   = str(inter_dir / f"{stem}_09_mst2_unpruned_bridges.png") if save_mst2_graph else None
@@ -396,7 +345,6 @@ def run_oneline_pipeline(
     print("\n" + "=" * 65)
     print("STAGE 4: CHINESE POSTMAN EULERIAN TOUR & POLYLINE STITCHING")
     print("=" * 65)
-
     cpp_results = chinese_postman(bridged_graph)
     euler_graph = cpp_results["euler_graph"]
     route = cpp_results["route"]
@@ -437,12 +385,10 @@ def run_oneline_pipeline(
     print("\n" + "=" * 65)
     print("STAGE 5: FOURIER RECONSTRUCTION (LOWEST K PER ACCURACY THRESHOLD)")
     print("=" * 65)
-
     original_z = fourier.resample_polyline_uniform(
         raw_polyline, n_samples=n_samples, mirror=mirror_path
     )
     coeffs, freqs = fourier.forward_fourier(original_z)
-
     reconstructions = fourier.reconstruct_for_accuracy_thresholds(
         coeffs=coeffs,
         original_z=original_z,
@@ -462,7 +408,7 @@ def run_oneline_pipeline(
         )
         saved_files["fourier_metrics_plot"] = metrics_img
 
-    # Save each reconstructed PNG with Accuracy Threshold and K in the title and filename
+    # Save each reconstructed PNG with Accuracy Threshold and K in the filename
     for res in reconstructions:
         t_acc = res["target_accuracy"]
         ach_acc = res["achieved_accuracy"]
@@ -478,7 +424,6 @@ def run_oneline_pipeline(
 
         labeled_filename = f"{custom_stem}_A{t_acc}_K{k_val}.png"
         img_out_path = str(base_out_dir / labeled_filename)
-
         save_labeled_reconstruction_image(
             coords_xy=coords_xy,
             save_path=img_out_path,
@@ -493,7 +438,6 @@ def run_oneline_pipeline(
             figsize=figsize,
             dpi=dpi,
         )
-
         res["output_image_path"] = img_out_path
         saved_files["final_images"].append(img_out_path)
 
@@ -535,13 +479,12 @@ def run_oneline_pipeline(
 # ==========================================================
 # EXAMPLE USAGE
 # ==========================================================
-
 if __name__ == "__main__":
     survey_results = run_oneline_pipeline(
         image_path="set_images/Sunflower/Sunflower.png",
-        output_path="sunflower_fig/",
+        output_path="sunflower_fig2/",
         accuracy_thresholds=[0.005, 0.01, 0.02, 0.04, 0.07],
         n_samples=10000,
-        show_labels_on_image=True,
+        show_labels_on_image=False,
         save_all_intermediaries=True,
     )
