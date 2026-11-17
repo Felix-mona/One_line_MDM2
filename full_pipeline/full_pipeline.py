@@ -237,9 +237,13 @@ def run_oneline_pipeline(
     save_all_intermediaries=False,
     save_binary_mask=False,
     save_skeleton=False,
+    save_junction_classification=False,
     save_raw_graph=False,
+    save_rdp_graph=False,
     save_base_graph=False,
     save_subdivided_graph=False,
+    save_mst1_graph=False,
+    save_mst2_graph=False,
     save_bridged_graph=False,
     save_eulerised_graph=False,
     save_euler_route=False,
@@ -274,9 +278,13 @@ def run_oneline_pipeline(
     if save_all_intermediaries:
         save_binary_mask = True
         save_skeleton = True
+        save_junction_classification = True
         save_raw_graph = True
+        save_rdp_graph = True
         save_base_graph = True
         save_subdivided_graph = True
+        save_mst1_graph = True
+        save_mst2_graph = True
         save_bridged_graph = True
         save_eulerised_graph = True
         save_euler_route = True
@@ -295,9 +303,11 @@ def run_oneline_pipeline(
     print("STAGE 1 & 2: SKELETONISATION & GRAPH FORMULATION")
     print("=" * 65)
 
-    bin_path = str(inter_dir / f"{stem}_01_binary_mask.png") if save_binary_mask else None
-    skel_path = str(inter_dir / f"{stem}_02_skeleton.png") if save_skeleton else None
-    raw_g_path = str(inter_dir / f"{stem}_03_raw_traced_graph.png") if save_raw_graph else None
+    bin_path   = str(inter_dir / f"{stem}_01_binary_mask.png") if save_binary_mask else None
+    skel_path  = str(inter_dir / f"{stem}_02_skeleton.png") if save_skeleton else None
+    junc_path  = str(inter_dir / f"{stem}_03_junction_classification.png") if save_junction_classification else None
+    raw_g_path = str(inter_dir / f"{stem}_04_raw_traced_graph.png") if save_raw_graph else None
+    rdp_g_path = str(inter_dir / f"{stem}_05_rdp_simplified.png") if save_rdp_graph else None
 
     base_graph, skeleton, canvas_diag, scale_factor = build_graph_from_image(
         image_path=str(image_path),
@@ -311,21 +321,27 @@ def run_oneline_pipeline(
         min_comp_prop=min_comp_prop,
         binary_save_path=bin_path,
         skeleton_save_path=skel_path,
+        junction_save_path=junc_path,
         raw_graph_save_path=raw_g_path,
+        rdp_save_path=rdp_g_path,
     )
 
     if bin_path:
         saved_files["binary_mask"] = bin_path
     if skel_path:
         saved_files["skeleton"] = skel_path
+    if junc_path:
+        saved_files["junction_classification"] = junc_path
     if raw_g_path:
         saved_files["raw_traced_graph"] = raw_g_path
+    if rdp_g_path:
+        saved_files["rdp_simplified"] = rdp_g_path
 
     if base_graph.number_of_nodes() == 0 or base_graph.number_of_edges() == 0:
         raise ValueError("Extracted base graph is empty. Check image_path and binarise_thresh.")
 
     if save_base_graph:
-        base_g_path = str(inter_dir / f"{stem}_04_base_graph.png")
+        base_g_path = str(inter_dir / f"{stem}_06_refined_base_graph.png")
         plot_original_graph(base_graph, save_path=base_g_path)
         saved_files["base_graph"] = base_g_path
 
@@ -336,7 +352,9 @@ def run_oneline_pipeline(
     print("STAGE 3: DOUBLE MST COMPONENT BRIDGING & PARITY PRUNING")
     print("=" * 65)
 
-    subdiv_path = str(inter_dir / f"{stem}_05_subdivided_graph.png") if save_subdivided_graph else None
+    subdiv_path = str(inter_dir / f"{stem}_07_subdivided_graph.png") if save_subdivided_graph else None
+    mst1_path   = str(inter_dir / f"{stem}_08_mst1_bridges.png") if save_mst1_graph else None
+    mst2_path   = str(inter_dir / f"{stem}_09_mst2_unpruned_bridges.png") if save_mst2_graph else None
 
     bridged_graph = double_mst_bridging(
         G=base_graph,
@@ -353,17 +371,23 @@ def run_oneline_pipeline(
         max_candidates_per_pair=max_candidates_per_pair,
         top_k_candidates=top_k_candidates,
         subdivided_save_path=subdiv_path,
+        mst1_save_path=mst1_path,
+        mst2_save_path=mst2_path,
     )
 
     if subdiv_path:
         saved_files["subdivided_graph"] = subdiv_path
+    if mst1_path:
+        saved_files["mst1_bridges"] = mst1_path
+    if mst2_path:
+        saved_files["mst2_unpruned_bridges"] = mst2_path
 
     if not nx.is_connected(bridged_graph):
         raise RuntimeError("Graph could not be connected via Double MST bridging.")
 
     if save_bridged_graph:
-        bridged_g_path = str(inter_dir / f"{stem}_06_bridged_graph.png")
-        plot_bridged_graph(bridged_graph, save_path=bridged_g_path)
+        bridged_g_path = str(inter_dir / f"{stem}_10_pruned_bridged_graph.png")
+        plot_bridged_graph(bridged_graph, save_path=bridged_g_path, title="Final Pruned Bridged Graph")
         saved_files["bridged_graph"] = bridged_g_path
 
     # ======================================================
@@ -383,17 +407,17 @@ def run_oneline_pipeline(
     print(f"Cumulative turning angle: {total_turn_angle:.2f} deg")
 
     if save_eulerised_graph:
-        euler_g_path = str(inter_dir / f"{stem}_07_eulerised_graph.png")
+        euler_g_path = str(inter_dir / f"{stem}_11_eulerised_graph.png")
         plot_eulerised_graph(euler_graph, save_path=euler_g_path)
         saved_files["eulerised_graph"] = euler_g_path
 
     if save_euler_route:
-        route_path = str(inter_dir / f"{stem}_08_euler_route.png")
+        route_path = str(inter_dir / f"{stem}_12_euler_route.png")
         plot_route(euler_graph, route, save_path=route_path)
         saved_files["euler_route"] = route_path
 
     if save_raw_polyline_plot:
-        raw_poly_img = str(inter_dir / f"{stem}_09_raw_polyline.png")
+        raw_poly_img = str(inter_dir / f"{stem}_13_raw_polyline.png")
         plot_polyline_preview(raw_polyline, raw_poly_img, title=f"{stem} - Unfiltered Euler Polyline")
         saved_files["raw_polyline_plot"] = raw_poly_img
 
@@ -428,7 +452,7 @@ def run_oneline_pipeline(
     )
 
     if save_fourier_metrics_plot:
-        metrics_img = str(inter_dir / f"{stem}_10_fourier_accuracy_curve.png")
+        metrics_img = str(inter_dir / f"{stem}_14_fourier_accuracy_curve.png")
         plot_fourier_accuracy_curve(
             coeffs=coeffs,
             original_z=original_z,
@@ -474,7 +498,7 @@ def run_oneline_pipeline(
         saved_files["final_images"].append(img_out_path)
 
         if save_hausdorff_overlay:
-            h_path = str(inter_dir / f"{stem}_11_hausdorff_A{t_acc}_K{k_val}.png")
+            h_path = str(inter_dir / f"{stem}_15_hausdorff_A{t_acc}_K{k_val}.png")
             plot_hausdorff_comparison(
                 original_z=original_z,
                 reconstructed_z=recon_z,
@@ -514,9 +538,9 @@ def run_oneline_pipeline(
 
 if __name__ == "__main__":
     survey_results = run_oneline_pipeline(
-        image_path="images/Sunflower/Sunflower.png",
-        output_path="outputs4/Sunflower",
-        accuracy_thresholds=[0.005, 0.01,0.02,0.04, 0.07],
+        image_path="set_images/Sunflower/Sunflower.png",
+        output_path="sunflower_fig/",
+        accuracy_thresholds=[0.005, 0.01, 0.02, 0.04, 0.07],
         n_samples=10000,
         show_labels_on_image=True,
         save_all_intermediaries=True,

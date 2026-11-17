@@ -569,6 +569,7 @@ def prune_whiskers_and_noise(G, whisker_thresh, min_comp_len):
 
     return dissolve_degree_two_nodes(H)
 
+
 # ==========================================================
 # 5. COMPLETE GRAPH FORMULATION PIPELINE & SAVING
 # ==========================================================
@@ -583,6 +584,46 @@ def save_binary_or_skeleton_image(mask, save_path, label="image"):
 def save_skeleton_image(skeleton, save_path):
     """Backwards-compatible wrapper for saving the binary skeleton."""
     save_binary_or_skeleton_image(skeleton, save_path, label="skeleton image")
+
+
+def plot_junction_classification(skeleton, nodes, node_types, scale_factor, save_path):
+    """Saves a plot of the skeleton with endpoints (green) and junctions (red) marked."""
+    plt.figure(figsize=(8, 7))
+    skel_pts = np.argwhere(skeleton > 0)
+    if len(skel_pts) > 0:
+        plt.scatter(
+            skel_pts[:, 1] * scale_factor,
+            -skel_pts[:, 0] * scale_factor,
+            color="lightgray",
+            s=2,
+            label="Medial Axis Skeleton",
+        )
+
+    ep_coords = [
+        (c * scale_factor, -r * scale_factor)
+        for nid, (r, c) in nodes.items()
+        if node_types.get(nid) == "endpoint"
+    ]
+    junc_coords = [
+        (c * scale_factor, -r * scale_factor)
+        for nid, (r, c) in nodes.items()
+        if node_types.get(nid) == "junction"
+    ]
+
+    if ep_coords:
+        ep_arr = np.array(ep_coords)
+        plt.scatter(ep_arr[:, 0], ep_arr[:, 1], color="limegreen", s=28, zorder=4, label="Endpoints (X=1)")
+    if junc_coords:
+        j_arr = np.array(junc_coords)
+        plt.scatter(j_arr[:, 0], j_arr[:, 1], color="crimson", s=32, zorder=5, label="Junctions (X>=3)")
+
+    plt.title(f"Rutovitz Junction Classification ({len(ep_coords)} endpoints, {len(junc_coords)} junctions)")
+    plt.axis("equal")
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc="upper right")
+    plt.savefig(save_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Saved junction classification plot to '{save_path}'")
 
 
 def plot_graph_snapshot(G, save_path, title="Graph Snapshot"):
@@ -614,11 +655,13 @@ def build_graph_from_image(
     min_comp_prop=0.015,
     binary_save_path=None,
     skeleton_save_path=None,
+    junction_save_path=None,
     raw_graph_save_path=None,
+    rdp_save_path=None,
 ):
     """
-    Full Section 2.1 pipeline with optional intermediate saves for the
-    cropped binary mask, Lee skeleton, and raw traced graph (pre-RDP).
+    Full Section 2.1 pipeline with optional intermediate saves for Binarisation,
+    Skeletonisation, Junction Classification, Raw Traced Graph, and RDP Simplification.
     """
     binary_mask, scale_factor, canvas_diag = load_and_scale_image(
         image_path=image_path,
@@ -646,6 +689,8 @@ def build_graph_from_image(
     nodes, node_types, node_grid, node_members = extract_canonical_nodes(
         skeleton, cn, merge_dist_work=d_euclid / scale_factor
     )
+    if junction_save_path:
+        plot_junction_classification(skeleton, nodes, node_types, scale_factor, junction_save_path)
 
     raw_G = trace_skeleton_to_graph(
         skeleton, nodes, node_types, node_grid, node_members, scale_factor
@@ -654,6 +699,9 @@ def build_graph_from_image(
         plot_graph_snapshot(raw_G, raw_graph_save_path, title="Raw Traced Graph (Pre-RDP)")
 
     rdp_G = apply_rdp_to_graph(raw_G, epsilon=rdp_epsilon)
+    if rdp_save_path:
+        plot_graph_snapshot(rdp_G, rdp_save_path, title="RDP Simplified Graph")
+
     merged_G = merge_nearby_junctions(rdp_G, d_edge_thresh=d_edge_thresh)
     final_G = prune_whiskers_and_noise(merged_G, whisker_thresh=whisker_thresh, min_comp_len=min_comp_len)
 

@@ -291,6 +291,7 @@ def _prune_redundant_bridges(bridges, num_comp):
 
     return kept
 
+
 def double_mst_bridging(
     G,
     canvas_diag,
@@ -306,18 +307,20 @@ def double_mst_bridging(
     max_candidates_per_pair=16,
     top_k_candidates=10,
     subdivided_save_path=None,
+    mst1_save_path=None,
+    mst2_save_path=None,
     **kwargs,
 ):
     """
     1. Splits sharp corners and subdivides long edges (optionally saving a plot).
-    2. Connects disconnected components using a 2-pass Kruskal MST.
+    2. Connects disconnected components using a 2-pass Kruskal MST (saving Pass 1 & Pass 2).
     3. Applies T-join parity pruning on Pass 2 and optional cycle redundancy pruning.
     """
     G = split_edges_at_sharp_corners(G, max_turn_angle_deg=corner_angle_deg)
     G = split_long_edges(G, max_edge_len=max_edge_len_prop * canvas_diag)
 
     if subdivided_save_path:
-        plot_bridged_graph(G, save_path=subdivided_save_path)
+        plot_bridged_graph(G, save_path=subdivided_save_path, title="Refined Graph (Corner & Edge Split)")
 
     components = [list(c) for c in nx.connected_components(G)]
     num_comp = len(components)
@@ -462,7 +465,13 @@ def double_mst_bridging(
         used_comp_pairs=set(),
         is_pass2=False,
     )
+    for b in mst1_bridges:
+        b["pass"] = "mst1"
     print(f"MST Pass 1 selected {len(mst1_bridges)} primary bridges.")
+
+    if mst1_save_path:
+        g_p1 = _inject_bridges_copy(G, mst1_bridges, pass_tag="mst1")
+        plot_bridged_graph(g_p1, save_path=mst1_save_path, title="MST Pass 1 (Primary Bridges)")
 
     used_pairs = {tuple(sorted((b["u"], b["v"]))) for b in mst1_bridges}
     used_comp_pairs = {(min(b["ci"], b["cj"]), max(b["ci"], b["cj"])) for b in mst1_bridges}
@@ -476,7 +485,13 @@ def double_mst_bridging(
         used_comp_pairs=used_comp_pairs,
         is_pass2=True,
     )
+    for b in mst2_bridges:
+        b["pass"] = "mst2"
     print(f"MST Pass 2 selected {len(mst2_bridges)} candidate return bridges.")
+
+    if mst2_save_path:
+        g_p2 = _inject_bridges_copy(G, mst1_bridges + mst2_bridges, pass_tag="mst2")
+        plot_bridged_graph(g_p2, save_path=mst2_save_path, title="MST Pass 1 + Pass 2 (Unpruned)")
 
     # Step 4: Exact T-Join Parity Pruning on Pass 2
     comp_deg_1 = {c: 0 for c in range(num_comp)}
@@ -529,23 +544,45 @@ def double_mst_bridging(
             pts=np.array([pos_u, pos_v], dtype=float),
             weight=b["dist"],
             bridge=True,
+            bridge_pass=b.get("pass", "mst1"),
         )
 
     print(f"Final bridged graph connected: {nx.is_connected(bridged_G)}")
     return bridged_G
 
+
 # ==========================================================
 # 4. SAVING VISUALISATION HELPER
 # ==========================================================
 
-def plot_bridged_graph(G, save_path="bridged_graph.png"):
-    """Saves a plot of the bridged graph (black = original strokes, cyan = MST bridges)."""
+def _inject_bridges_copy(G, bridge_list, pass_tag="mst1"):
+    """Returns a copy of G with the given bridge list injected for plotting."""
+    H = G.copy()
+    for b in bridge_list:
+        pos_u = np.asarray(H.nodes[b["u"]]["pos"], dtype=float)
+        pos_v = np.asarray(H.nodes[b["v"]]["pos"], dtype=float)
+        H.add_edge(
+            b["u"],
+            b["v"],
+            pts=np.array([pos_u, pos_v], dtype=float),
+            weight=b["dist"],
+            bridge=True,
+            bridge_pass=b.get("pass", pass_tag),
+        )
+    return H
+
+
+def plot_bridged_graph(G, save_path="bridged_graph.png", title="Double MST Bridged Graph"):
+    """Saves a plot of the bridged graph (black = strokes, cyan = Pass 1, magenta = Pass 2)."""
     plt.figure(figsize=(9, 8))
 
     for u, v, k, data in G.edges(keys=True, data=True):
         pts = np.asarray(data["pts"], dtype=float)
         if data.get("bridge", False):
-            plt.plot(pts[:, 0], pts[:, 1], "c--", linewidth=2.2, label="MST Bridge", zorder=4)
+            if data.get("bridge_pass") == "mst2":
+                plt.plot(pts[:, 0], pts[:, 1], "m--", linewidth=2.2, label="MST Pass 2 Bridge", zorder=4)
+            else:
+                plt.plot(pts[:, 0], pts[:, 1], "c--", linewidth=2.2, label="MST Pass 1 Bridge", zorder=4)
         else:
             plt.plot(pts[:, 0], pts[:, 1], "k-", linewidth=1.5, zorder=2)
 
@@ -558,7 +595,7 @@ def plot_bridged_graph(G, save_path="bridged_graph.png"):
     if by_label:
         plt.legend(by_label.values(), by_label.keys(), loc="upper right")
 
-    plt.title("Double MST Bridged Graph (Cyan = Bridges)")
+    plt.title(title)
     plt.axis("equal")
     plt.grid(True, alpha=0.3)
     plt.savefig(save_path, dpi=200, bbox_inches="tight")
