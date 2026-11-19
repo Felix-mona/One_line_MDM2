@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import networkx as nx
-from pipeline.full_pipeline import run_oneline_pipeline
+from full_pipeline import run_oneline_pipeline
 
 
 def parse_args() -> argparse.Namespace:
