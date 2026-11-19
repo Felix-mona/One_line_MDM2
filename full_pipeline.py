@@ -24,11 +24,11 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 
-from double_mst import double_mst_bridging, plot_bridged_graph
-import fourier_reconstruction as fourier
-from graph_formulation import build_graph_from_image
-import metrics as met
-from route_mapping import (
+from pipeline.double_mst import double_mst_bridging, plot_bridged_graph
+import pipeline.fourier_reconstruction as fourier
+from pipeline.graph_formulation import build_graph_from_image
+import pipeline.metrics as met
+from pipeline.route_mapping import (
     chinese_postman,
     compute_total_turn_angle,
     plot_eulerised_graph,

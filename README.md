@@ -8,14 +8,14 @@ An automated pipeline that converts any 2D raster sketch into a smooth, unbroken
 
 ## Repository Structure
 
-```text
+```
 .
 ├── README.md                          # Project documentation & parameter reference
 ├── run.py                             # Command-line entrypoint for running the pipeline
+├── full_pipeline.py                   # End-to-end orchestrator connecting Steps 1–5
 ├── Set_Images/                        # Benchmark test sketches (Sunflower, Hedgehog, Indonesia, etc.)
 ├── archive/                           # Archived exploratory scripts and earlier prototypes
-└── pipeline/                          # Core one-line generation & evaluation modules
-    ├── full_pipeline.py               # End-to-end orchestrator connecting Steps 1–5
+└── pipeline/                          # Core one-line generation & evaluation sub-modules
     ├── graph_formulation.py           # Step 1: Binarisation, Lee thinning, Rutovitz CN, RDP & refinement
     ├── double_mst.py                  # Step 2: Sharp-corner/edge subdivision & Double MST bridging
     ├── route_mapping.py               # Step 3: Chinese Postman matching & minimum-angle Fleury walk
@@ -27,7 +27,7 @@ An automated pipeline that converts any 2D raster sketch into a smooth, unbroken
 | File | Report Section | Description | 
 | ----- | ----- | ----- | 
 | `run.py` | — | Command-line entrypoint at the project root for running the full pipeline on any image. | 
-| `pipeline/full_pipeline.py` | Sections 2.1–2.5 | End-to-end orchestrator connecting Steps 1–5 and exporting 300 DPI borderless plots. | 
+| `full_pipeline.py` | Sections 2.1–2.5 | End-to-end orchestrator at the project root connecting Steps 1–5 and exporting 300 DPI borderless plots. | 
 | `pipeline/graph_formulation.py` | Section 2.1 | Binarisation, Lee medial-axis thinning, Rutovitz crossing numbers, RDP decimation, and graph refinement. | 
 | `pipeline/double_mst.py` | Section 2.2 | Sharp-corner ($\ge 65^\circ$) & long-edge subdivision and two-pass Kruskal MST bridging with T-join parity pruning. | 
 | `pipeline/route_mapping.py` | Section 2.3 | Chinese Postman Problem (Dijkstra + minimum-weight matching) and minimum-deflection Fleury Eulerian walk. | 
@@ -72,12 +72,12 @@ python run.py Set_Images/Sunflower/Sunflower.png -o outputs/ -t 0.01 0.02 0.05 -
 | `--svg` | `False` | Export reconstructed one-line trajectories as standalone vector `.svg` files. | 
 | `--save-all` | `False` | Save all intermediate step PNGs, `.npy` polylines, and `.svg` files. | 
 
-### 2. Run Programmatically (`pipeline/full_pipeline.py`)
+### 2. Run Programmatically (`full_pipeline.py`)
 
-Import `run_oneline_pipeline` directly from the `pipeline` package into Python scripts or notebooks for full control over every stage parameter:
+Import `run_oneline_pipeline` directly from `full_pipeline` at the repository root into Python scripts or notebooks for full control over every stage parameter:
 
 ```python
-from pipeline.full_pipeline import run_oneline_pipeline
+from full_pipeline import run_oneline_pipeline
 
 results = run_oneline_pipeline(
     image_path="Set_Images/Sunflower/Sunflower.png",
@@ -96,7 +96,6 @@ for rec in results["reconstructions"]:
 To inspect Steps 1–3 (skeletonisation, Double MST component bridging, and Chinese Postman Eulerian circuit construction) without running Fourier smoothing:
 
 1. Edit `IMAGE_PATH` and `OUTPUT_DIR` at the top of `pipeline/formulation_main.py`.
-
 2. Run from the repository root:
 
    ```bash

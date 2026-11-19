@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.spatial import cKDTree
 
-import fourier_reconstruction as fourier
+import pipeline.fourier_reconstruction as fourier
 
 
 def compute_weighted_loss(

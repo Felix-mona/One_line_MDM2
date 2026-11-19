@@ -17,7 +17,7 @@ import numpy as np
 import scipy.fft as fft
 from scipy.spatial import cKDTree
 
-import metrics as met
+import pipeline.metrics as met
 
 
 def resample_polyline_uniform(
